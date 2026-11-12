@@ -9,7 +9,7 @@
        │  (MCP Stdio JSON-RPC 2.0)
        ▼
 [开发者客户端 (dev-client)]  ◄── 本地磁盘流式上传/下载 (upload / download)
-       │                     ◄── 本地 TCP 端口双向转发 (forwarding)
+       │                     ◄── 本地 TCP/UDP 端口双向转发 (forwarding)
        │  (WebSocket + Yamux, X-Dev-Key)
        ▼
 [公网服务器 (relay-server)]  ── 托管 ./releases/ 供远古客户端自动更新
@@ -145,7 +145,7 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
 ### 2. 在目标机器运行用户客户端 (`user-client`)
 
 - **GUI 模式（默认，适合直接发给不懂技术的用户双击运行）**：
-  直接双击 `user-client.exe`（Windows 下无黑框），在窗口填入连接密钥，点击 **Connect / Save**。密钥会自动保存在本地用户目录（`%APPDATA%\mcp-remoteaccess\user-client.json` 或 `~/.config/mcp-remoteaccess/user-client.json`），后续双击直接自动连接。
+  直接双击 `user-client.exe`（Windows 下无黑框），在窗口填入连接密钥，点击 **Connect**。若勾选 **Save File**，配置将保存在本地用户目录（`%APPDATA%\mcp-remoteaccess\user-client.json` 或 `~/.config/mcp-remoteaccess/user-client.json`）以便后续自动读取；默认取消勾选，取消勾选状态下不会在磁盘保存任何文件。
 - **CLI 模式（高度自定义）**：
   ```bash
   ./user-client -cli -server "example.com:20055" -key "my-user-secret" -shell pwsh -id "office-pc" -workdir "C:\Projects"
@@ -193,4 +193,4 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
 
 13. `upload`：从开发者本机流式上传文件或整个目录到远程目标机（含 SHA256 校验）。
 14. `download`：从远程目标机流式下载文件或整个目录到开发者本机（含 SHA256 校验）。
-15. `forwarding`：统一管理双向 TCP 端口转发（`action: "add" | "remove" | "list"`，支持 `remote_to_local` 与 `local_to_remote`）。
+15. `forwarding`：统一管理双向 TCP/UDP 端口转发（`action: "add" | "remove" | "list"`，`protocol: "tcp" | "udp"`，支持 `remote_to_local` 与 `local_to_remote`）。

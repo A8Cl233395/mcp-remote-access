@@ -41,8 +41,8 @@ const linuxGUIHTML = `<!DOCTYPE html>
   <input id="key" type="text" />
   <div style="margin-bottom: 14px;">
     <label style="display: inline-flex; align-items: center; font-size: 13px; font-weight: normal; cursor: pointer; user-select: none;">
-      <input id="saveKey" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;" checked />
-      Save Key
+      <input id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;" />
+      Save File
     </label>
   </div>
   <div style="display: flex; gap: 10px;">
@@ -52,11 +52,11 @@ const linuxGUIHTML = `<!DOCTYPE html>
   <div class="status" id="status">Status: Loading...</div>
 </div>
 <script>
-let userChangedSaveKey = false;
+let userChangedSaveFile = false;
 let isExiting = false;
 
-document.getElementById('saveKey').addEventListener('change', function() {
-  userChangedSaveKey = true;
+document.getElementById('saveFile').addEventListener('change', function() {
+  userChangedSaveFile = true;
 });
 
 async function loadState() {
@@ -67,8 +67,8 @@ async function loadState() {
     if (!document.getElementById('key').value && d.key) {
       document.getElementById('key').value = d.key;
     }
-    if (!userChangedSaveKey && typeof d.saveKey === 'boolean') {
-      document.getElementById('saveKey').checked = d.saveKey;
+    if (!userChangedSaveFile && typeof d.saveFile === 'boolean') {
+      document.getElementById('saveFile').checked = d.saveFile;
     }
     document.getElementById('status').innerText = 'Status: ' + d.status;
   } catch(e) {
@@ -88,11 +88,11 @@ async function sendHeartbeat() {
 async function connectNow() {
   if (isExiting) return;
   const key = document.getElementById('key').value;
-  const saveKey = document.getElementById('saveKey').checked;
+  const saveFile = document.getElementById('saveFile').checked;
   await fetch('/api/connect', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({key, saveKey})
+    body: JSON.stringify({key, saveFile})
   });
   loadState();
 }
@@ -143,7 +143,7 @@ func RunGUI(opts ClientOptions) error {
 	var cancelFn context.CancelFunc
 	var sharedClient *Client
 
-	startAgent := func(key string, saveKey bool) {
+	startAgent := func(key string, saveFile bool) {
 		mu.Lock()
 		if cancelFn != nil {
 			cancelFn()
@@ -159,15 +159,15 @@ func RunGUI(opts ClientOptions) error {
 		cancelFn = cancel
 
 		pCfg := LoadPersistentConfig()
-		if saveKey {
+		if saveFile {
 			pCfg.UserKey = curKey
+			if opts.MachineID != "" {
+				pCfg.MachineID = opts.MachineID
+			}
+			_ = SavePersistentConfig(pCfg)
 		} else {
-			pCfg.UserKey = ""
+			_ = os.Remove(ConfigFilePath())
 		}
-		if opts.MachineID != "" {
-			pCfg.MachineID = opts.MachineID
-		}
-		_ = SavePersistentConfig(pCfg)
 
 		if sharedClient == nil {
 			runOpts := opts
@@ -193,7 +193,7 @@ func RunGUI(opts ClientOptions) error {
 	}
 
 	if strings.TrimSpace(curKey) != "" {
-		startAgent(curKey, true)
+		startAgent(curKey, false)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -300,29 +300,27 @@ func RunGUI(opts ClientOptions) error {
 		mu.Lock()
 		defer mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		pCfg := LoadPersistentConfig()
-		saveKey := pCfg.UserKey != ""
-		if pCfg.UserKey == "" && curKey == "" {
-			saveKey = true
-		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"key":     curKey,
-			"status":  curStatus,
-			"saveKey": saveKey,
+			"key":      curKey,
+			"status":   curStatus,
+			"saveFile": false,
 		})
 	})
 	mux.HandleFunc("/api/connect", func(w http.ResponseWriter, r *http.Request) {
 		touchHeartbeat()
 		var body struct {
-			Key     string `json:"key"`
-			SaveKey *bool  `json:"saveKey"`
+			Key      string `json:"key"`
+			SaveFile *bool  `json:"saveFile"`
+			SaveKey  *bool  `json:"saveKey"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		saveKey := true
-		if body.SaveKey != nil {
-			saveKey = *body.SaveKey
+		saveFile := false
+		if body.SaveFile != nil {
+			saveFile = *body.SaveFile
+		} else if body.SaveKey != nil {
+			saveFile = *body.SaveKey
 		}
-		startAgent(body.Key, saveKey)
+		startAgent(body.Key, saveFile)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})

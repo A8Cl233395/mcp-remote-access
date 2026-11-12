@@ -52,9 +52,29 @@ type Client struct {
 	jobs     *JobRegistry
 	wakeLock *WakeLock
 
-	revMu           sync.Mutex
-	revSeq          uint64
-	pendingRevConns map[string]net.Conn
+	revMu              sync.Mutex
+	revSeq             uint64
+	pendingRevConns    map[string]net.Conn
+	pendingUDPRevConns map[string]*agentUDPSession
+}
+
+type agentUDPSession struct {
+	connID    string
+	peerAddr  net.Addr
+	toDev     chan []byte
+	writeTo   func([]byte) error
+	closeFn   func()
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (s *agentUDPSession) Close() {
+	s.closeOnce.Do(func() {
+		close(s.done)
+		if s.closeFn != nil {
+			s.closeFn()
+		}
+	})
 }
 
 func NewClient(opts ClientOptions) *Client {
@@ -102,7 +122,8 @@ func NewClient(opts ClientOptions) *Client {
 		isAdmin:         CheckIsAdmin(),
 		jobs:            NewJobRegistry(),
 		wakeLock:        NewWakeLock(),
-		pendingRevConns: make(map[string]net.Conn),
+		pendingRevConns:    make(map[string]net.Conn),
+		pendingUDPRevConns: make(map[string]*agentUDPSession),
 	}
 }
 
@@ -113,6 +134,10 @@ func (c *Client) Close() {
 	for id, conn := range c.pendingRevConns {
 		delete(c.pendingRevConns, id)
 		_ = conn.Close()
+	}
+	for id, sess := range c.pendingUDPRevConns {
+		delete(c.pendingUDPRevConns, id)
+		sess.Close()
 	}
 	c.revMu.Unlock()
 	c.mu.Lock()
@@ -365,6 +390,12 @@ func (c *Client) handleStream(raw io.ReadWriteCloser) {
 		c.handleReverseListenStream(bs, hdr)
 	case protocol.StreamTypeReverseAccept:
 		c.handleReverseAcceptStream(bs, hdr)
+	case protocol.StreamTypeUDPConnect:
+		c.handleUDPConnectStream(bs, hdr)
+	case protocol.StreamTypeUDPReverseListen:
+		c.handleUDPReverseListenStream(bs, hdr)
+	case protocol.StreamTypeUDPReverseAccept:
+		c.handleUDPReverseAcceptStream(bs, hdr)
 	default:
 		_ = protocol.WriteLineJSON(bs, protocol.StreamAck{
 			OK:    false,
@@ -776,5 +807,244 @@ func (c *Client) handleReverseAcceptStream(bs *protocol.BufferedStream, hdr prot
 		_, _ = io.Copy(bs, targetConn)
 		_ = bs.Close()
 	}()
+	wg.Wait()
+}
+
+func (c *Client) handleUDPConnectStream(bs *protocol.BufferedStream, hdr protocol.StreamHeader) {
+	defer bs.Close()
+
+	uconn, err := net.Dial("udp", hdr.RemoteAddr)
+	if err != nil {
+		_ = protocol.WriteLineJSON(bs, protocol.StreamAck{
+			OK:    false,
+			Error: fmt.Sprintf("dial udp %s on target machine failed: %v", hdr.RemoteAddr, err),
+		})
+		return
+	}
+	defer uconn.Close()
+
+	bound := ""
+	if la := uconn.LocalAddr(); la != nil {
+		bound = la.String()
+	}
+
+	if err := protocol.WriteLineJSON(bs, protocol.StreamAck{
+		OK:        true,
+		BoundAddr: bound,
+	}); err != nil {
+		return
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream -> UDP
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, protocol.MaxUDPPacketSize)
+		for {
+			n, err := protocol.ReadPacket(bs, buf)
+			if err != nil {
+				break
+			}
+			if _, err := uconn.Write(buf[:n]); err != nil {
+				break
+			}
+		}
+		_ = uconn.Close()
+	}()
+
+	// UDP -> Stream
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, protocol.MaxUDPPacketSize)
+		for {
+			n, err := uconn.Read(buf)
+			if err != nil {
+				break
+			}
+			if err := protocol.WritePacket(bs, buf[:n]); err != nil {
+				break
+			}
+		}
+		_ = bs.Close()
+	}()
+
+	wg.Wait()
+}
+
+func (c *Client) handleUDPReverseListenStream(bs *protocol.BufferedStream, hdr protocol.StreamHeader) {
+	ln, err := net.ListenPacket("udp", hdr.RemoteAddr)
+	if err != nil {
+		_ = protocol.WriteLineJSON(bs, protocol.StreamAck{
+			OK:    false,
+			Error: fmt.Sprintf("listen udp %s on target machine failed: %v", hdr.RemoteAddr, err),
+		})
+		_ = bs.Close()
+		return
+	}
+	defer ln.Close()
+	defer bs.Close()
+
+	if err := protocol.WriteLineJSON(bs, protocol.StreamAck{
+		OK:        true,
+		BoundAddr: ln.LocalAddr().String(),
+	}); err != nil {
+		return
+	}
+
+	// Close listener when control stream closes
+	go func() {
+		buf := make([]byte, 64)
+		_, _ = bs.Read(buf)
+		_ = ln.Close()
+	}()
+
+	var sessMu sync.Mutex
+	sessions := make(map[string]*agentUDPSession)
+	var writeMu sync.Mutex
+
+	defer func() {
+		sessMu.Lock()
+		for _, s := range sessions {
+			s.Close()
+		}
+		sessions = nil
+		sessMu.Unlock()
+	}()
+
+	buf := make([]byte, protocol.MaxUDPPacketSize)
+	for {
+		n, peerAddr, err := ln.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		peerKey := peerAddr.String()
+
+		sessMu.Lock()
+		sess, ok := sessions[peerKey]
+		if !ok {
+			connID := fmt.Sprintf("rev-udp-%d", atomic.AddUint64(&c.revSeq, 1))
+			sess = &agentUDPSession{
+				connID:   connID,
+				peerAddr: peerAddr,
+				toDev:    make(chan []byte, 128),
+				done:     make(chan struct{}),
+				writeTo: func(p []byte) error {
+					_, wErr := ln.WriteTo(p, peerAddr)
+					return wErr
+				},
+				closeFn: func() {
+					sessMu.Lock()
+					delete(sessions, peerKey)
+					sessMu.Unlock()
+					c.revMu.Lock()
+					delete(c.pendingUDPRevConns, connID)
+					c.revMu.Unlock()
+				},
+			}
+			sessions[peerKey] = sess
+
+			c.revMu.Lock()
+			c.pendingUDPRevConns[connID] = sess
+			c.revMu.Unlock()
+
+			// Auto-cleanup if not claimed in 15s
+			go func(s *agentUDPSession, id string) {
+				select {
+				case <-time.After(15 * time.Second):
+					c.revMu.Lock()
+					if _, pending := c.pendingUDPRevConns[id]; pending {
+						s.Close()
+					}
+					c.revMu.Unlock()
+				case <-s.done:
+				}
+			}(sess, connID)
+
+			writeMu.Lock()
+			wErr := protocol.WriteLineJSON(bs, protocol.ReverseConnEvent{
+				ConnID:     connID,
+				RemotePeer: peerKey,
+			})
+			writeMu.Unlock()
+			if wErr != nil {
+				sessMu.Unlock()
+				return
+			}
+		}
+
+		pktCopy := make([]byte, n)
+		copy(pktCopy, buf[:n])
+		select {
+		case sess.toDev <- pktCopy:
+		default:
+		}
+		sessMu.Unlock()
+	}
+}
+
+func (c *Client) handleUDPReverseAcceptStream(bs *protocol.BufferedStream, hdr protocol.StreamHeader) {
+	c.revMu.Lock()
+	sess, ok := c.pendingUDPRevConns[hdr.ConnID]
+	if ok {
+		delete(c.pendingUDPRevConns, hdr.ConnID)
+	}
+	c.revMu.Unlock()
+
+	if !ok || sess == nil {
+		_ = protocol.WriteLineJSON(bs, protocol.StreamAck{
+			OK:    false,
+			Error: fmt.Sprintf("reverse udp conn_id %s not found or expired", hdr.ConnID),
+		})
+		_ = bs.Close()
+		return
+	}
+	defer bs.Close()
+	defer sess.Close()
+
+	if err := protocol.WriteLineJSON(bs, protocol.StreamAck{OK: true}); err != nil {
+		return
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-sess.done:
+				_ = bs.Close()
+				return
+			case pkt, open := <-sess.toDev:
+				if !open {
+					_ = bs.Close()
+					return
+				}
+				if err := protocol.WritePacket(bs, pkt); err != nil {
+					_ = bs.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, protocol.MaxUDPPacketSize)
+		for {
+			n, err := protocol.ReadPacket(bs, buf)
+			if err != nil {
+				break
+			}
+			if err := sess.writeTo(buf[:n]); err != nil {
+				break
+			}
+		}
+		sess.Close()
+		_ = bs.Close()
+	}()
+
 	wg.Wait()
 }

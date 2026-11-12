@@ -28,6 +28,7 @@ func main() {
 	workdir := flag.String("workdir", envOrDefault("MCP_WORKDIR", saved.Workdir), "Initial working directory")
 	noUpdate := flag.Bool("no-update", false, "Disable automatic binary self-update check")
 	insecure := flag.Bool("insecure", envOrDefault("MCP_INSECURE", "") == "1", "Skip SSL certificate verification and allow insecure connections")
+	saveFile := flag.Bool("save", false, "Save configuration to file")
 	flag.Parse()
 
 	opts := agent.ClientOptions{
@@ -45,14 +46,15 @@ func main() {
 		if opts.UserKey == "" {
 			opts.UserKey = "default-user-key"
 		}
-		// Persist CLI settings for convenience
-		saved.ServerAddr = opts.ServerAddr
-		saved.UserKey = opts.UserKey
-		saved.MachineID = opts.MachineID
-		if opts.Shell != "" {
-			saved.Shell = opts.Shell
+		if *saveFile {
+			saved.ServerAddr = opts.ServerAddr
+			saved.UserKey = opts.UserKey
+			saved.MachineID = opts.MachineID
+			if opts.Shell != "" {
+				saved.Shell = opts.Shell
+			}
+			_ = agent.SavePersistentConfig(saved)
 		}
-		_ = agent.SavePersistentConfig(saved)
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

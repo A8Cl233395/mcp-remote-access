@@ -22,9 +22,12 @@ const (
 	StreamTypeRPC           = "agent_rpc"
 	StreamTypeFileUpload    = "file_upload"
 	StreamTypeFileDownload  = "file_download"
-	StreamTypeTCPConnect    = "tcp_connect"
-	StreamTypeReverseListen = "reverse_listen"
-	StreamTypeReverseAccept = "reverse_accept"
+	StreamTypeTCPConnect       = "tcp_connect"
+	StreamTypeReverseListen    = "reverse_listen"
+	StreamTypeReverseAccept    = "reverse_accept"
+	StreamTypeUDPConnect       = "udp_connect"
+	StreamTypeUDPReverseListen = "udp_reverse_listen"
+	StreamTypeUDPReverseAccept = "udp_reverse_accept"
 )
 
 // DefaultServerAddr is the built-in relay server address used when -server is not specified via CLI.

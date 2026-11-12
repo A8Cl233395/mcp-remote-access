@@ -4,7 +4,7 @@ This file provides architectural context, build/test commands, and engineering i
 
 ## Project Overview
 
-`mcp-remoteaccess` is a zero-configuration remote machine control, file streaming, and bidirectional TCP port forwarding suite built for AI agents over the Model Context Protocol (MCP).
+`mcp-remoteaccess` is a zero-configuration remote machine control, file streaming, and bidirectional TCP/UDP port forwarding suite built for AI agents over the Model Context Protocol (MCP).
 
 ### Three-Component Architecture
 1. **`cmd/relay-server` (`internal/relay`)**:

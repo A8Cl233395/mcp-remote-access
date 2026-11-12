@@ -86,7 +86,7 @@ const (
 	idEditKey       = 102
 	idBtnConnect    = 103
 	idStaticStatus  = 104
-	idCheckSaveKey  = 105
+	idCheckSaveFile = 105
 )
 
 type wndClassExW struct {
@@ -122,7 +122,7 @@ var (
 	hwndMain       syscall.Handle
 	hwndServerEdit syscall.Handle
 	hwndKeyEdit    syscall.Handle
-	hwndSaveKeyChk syscall.Handle
+	hwndSaveFileChk syscall.Handle
 	hwndBtnConnect syscall.Handle
 	hwndStatus     syscall.Handle
 	latestStatus   string
@@ -149,7 +149,7 @@ func getWindowText(hwnd syscall.Handle) string {
 	return syscall.UTF16ToString(buf)
 }
 
-func startOrRestartAgent(userKey string, saveKey bool) {
+func startOrRestartAgent(userKey string, saveFile bool) {
 	userKey = strings.TrimSpace(userKey)
 	if userKey == "" {
 		guiMu.Lock()
@@ -163,15 +163,15 @@ func startOrRestartAgent(userKey string, saveKey bool) {
 	}
 
 	pCfg := LoadPersistentConfig()
-	if saveKey {
+	if saveFile {
 		pCfg.UserKey = userKey
+		if guiBaseOpts.MachineID != "" {
+			pCfg.MachineID = guiBaseOpts.MachineID
+		}
+		_ = SavePersistentConfig(pCfg)
 	} else {
-		pCfg.UserKey = ""
+		_ = os.Remove(ConfigFilePath())
 	}
-	if guiBaseOpts.MachineID != "" {
-		pCfg.MachineID = guiBaseOpts.MachineID
-	}
-	_ = SavePersistentConfig(pCfg)
 
 	guiMu.Lock()
 	if guiCancel != nil {
@@ -236,15 +236,9 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		createCtrl("STATIC", "Connection Key:", wsChild|wsVisible, 16, 20, 95, 22, 0)
 		hwndKeyEdit = createCtrl("EDIT", guiBaseOpts.UserKey, wsChild|wsVisible|wsBorder|wsTabStop|esAutoHScroll, 115, 18, 285, 24, idEditKey)
 
-		hwndSaveKeyChk = createCtrl("BUTTON", "Save Key", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 115, 48, 120, 22, idCheckSaveKey)
-		initCheck := bstChecked
-		pCfg := LoadPersistentConfig()
-		if pCfg.UserKey == "" && strings.TrimSpace(guiBaseOpts.UserKey) == "" {
-			initCheck = bstChecked
-		} else if pCfg.UserKey == "" && strings.TrimSpace(guiBaseOpts.UserKey) != "" {
-			initCheck = bstChecked
-		}
-		_, _, _ = procSendMessageW.Call(uintptr(hwndSaveKeyChk), bmSetCheck, uintptr(initCheck), 0)
+		hwndSaveFileChk = createCtrl("BUTTON", "Save File", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 115, 48, 120, 22, idCheckSaveFile)
+		initCheck := bstUnchecked
+		_, _, _ = procSendMessageW.Call(uintptr(hwndSaveFileChk), bmSetCheck, uintptr(initCheck), 0)
 
 		hwndBtnConnect = createCtrl("BUTTON", "Connect", wsChild|wsVisible|wsTabStop|bsPushButton, 115, 76, 120, 28, idBtnConnect)
 		hwndStatus = createCtrl("STATIC", "Status: Idle", wsChild|wsVisible, 16, 112, 385, 44, idStaticStatus)
@@ -254,9 +248,9 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		id := wParam & 0xFFFF
 		if id == idBtnConnect {
 			key := getWindowText(hwndKeyEdit)
-			checkState, _, _ := procSendMessageW.Call(uintptr(hwndSaveKeyChk), bmGetCheck, 0, 0)
-			saveKey := checkState == bstChecked
-			startOrRestartAgent(key, saveKey)
+			checkState, _, _ := procSendMessageW.Call(uintptr(hwndSaveFileChk), bmGetCheck, 0, 0)
+			saveFile := checkState == bstChecked
+			startOrRestartAgent(key, saveFile)
 			return 0
 		}
 

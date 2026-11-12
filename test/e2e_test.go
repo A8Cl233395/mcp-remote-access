@@ -481,6 +481,118 @@ func TestEndToEndAllToolsAndAutoUpdate(t *testing.T) {
 		t.Fatalf("forwarding remove #2 failed: %s", txt)
 	}
 
+	// Test UDP forwarding (both remote_to_local and local_to_remote)
+	remoteUDPSvc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remoteUDPSvc.Close()
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, peer, err := remoteUDPSvc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = remoteUDPSvc.WriteTo([]byte("REMOTE_UDP_ECHO:"+string(buf[:n])), peer)
+		}
+	}()
+
+	txt, isErr = callTool("forwarding", map[string]any{
+		"action":      "add",
+		"protocol":    "udp",
+		"direction":   "remote_to_local",
+		"local_addr":  "127.0.0.1:0",
+		"remote_addr": remoteUDPSvc.LocalAddr().String(),
+	})
+	if isErr || !strings.Contains(txt, "Added remote_to_local forwarding #3") {
+		t.Fatalf("forwarding add udp remote_to_local failed: %s", txt)
+	}
+	var boundLocalUDPAddr string
+	for _, part := range strings.Fields(txt) {
+		if strings.HasPrefix(part, "127.0.0.1:") {
+			boundLocalUDPAddr = part
+			break
+		}
+	}
+	if boundLocalUDPAddr == "" {
+		t.Fatalf("could not parse boundLocalUDPAddr from: %s", txt)
+	}
+
+	udpClientConn, err := net.DialTimeout("udp", boundLocalUDPAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial forwarded local udp port failed: %v", err)
+	}
+	_, _ = udpClientConn.Write([]byte("udpping123"))
+	_ = udpClientConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	udpReplyBuf := make([]byte, 512)
+	n, err = udpClientConn.Read(udpReplyBuf)
+	_ = udpClientConn.Close()
+	if err != nil || string(udpReplyBuf[:n]) != "REMOTE_UDP_ECHO:udpping123" {
+		t.Fatalf("remote_to_local udp echo mismatch: %q (%v)", string(udpReplyBuf[:n]), err)
+	}
+
+	// Test local_to_remote UDP
+	localUDPSvc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localUDPSvc.Close()
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, peer, err := localUDPSvc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = localUDPSvc.WriteTo([]byte("LOCAL_UDP_ECHO:"+string(buf[:n])), peer)
+		}
+	}()
+
+	txt, isErr = callTool("forwarding", map[string]any{
+		"action":      "add",
+		"protocol":    "udp",
+		"direction":   "local_to_remote",
+		"local_addr":  localUDPSvc.LocalAddr().String(),
+		"remote_addr": "127.0.0.1:0",
+	})
+	if isErr || !strings.Contains(txt, "Added local_to_remote forwarding #4") {
+		t.Fatalf("forwarding add udp local_to_remote failed: %s", txt)
+	}
+	var boundRemoteUDPAddr string
+	fields = strings.Fields(txt)
+	for i := 0; i < len(fields)-1; i++ {
+		if fields[i] == "remote" && strings.HasPrefix(fields[i+1], "127.0.0.1:") {
+			boundRemoteUDPAddr = fields[i+1]
+			break
+		}
+	}
+	if boundRemoteUDPAddr == "" {
+		t.Fatalf("could not parse boundRemoteUDPAddr from: %s", txt)
+	}
+
+	revUDPConn, err := net.DialTimeout("udp", boundRemoteUDPAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial reverse forwarded remote udp port failed: %v", err)
+	}
+	_, _ = revUDPConn.Write([]byte("udppong456"))
+	_ = revUDPConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err = revUDPConn.Read(udpReplyBuf)
+	_ = revUDPConn.Close()
+	if err != nil || string(udpReplyBuf[:n]) != "LOCAL_UDP_ECHO:udppong456" {
+		t.Fatalf("local_to_remote udp echo mismatch: %q (%v)", string(udpReplyBuf[:n]), err)
+	}
+
+	// Remove UDP rules
+	txt, isErr = callTool("forwarding", map[string]any{"action": "remove", "id": "3"})
+	if isErr || !strings.Contains(txt, "Removed port forwarding rule #3") {
+		t.Fatalf("forwarding remove #3 failed: %s", txt)
+	}
+	txt, isErr = callTool("forwarding", map[string]any{"action": "remove", "id": "4"})
+	if isErr || !strings.Contains(txt, "Removed port forwarding rule #4") {
+		t.Fatalf("forwarding remove #4 failed: %s", txt)
+	}
+
 	// 4. Test Auto-Update Mechanism for "Ancient Client"
 	ext := ""
 	if runtime.GOOS == "windows" {

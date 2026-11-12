@@ -107,7 +107,7 @@
 | 12 | `job_kill` | `{ id: string\|int }` | 强制终止目标机后台任务及其整个进程树，返回最终状态与未读输出。 |
 | 13 | `upload` | `{ local_path: string, remote_path: string }` | 将开发者本机文件或整个目录流式上传至目标机指定路径，返回传输字节数、文件数、SHA256 与耗时。 |
 | 14 | `download` | `{ remote_path: string, local_path: string }` | 将目标机文件或整个目录流式下载至开发者本机指定路径，返回传输字节数、文件数、SHA256 与耗时。 |
-| 15 | `forwarding` | `{ action: "add"\|"remove"\|"list", id?: string, direction?: "remote_to_local"\|"local_to_remote", local_addr?: string, remote_addr?: string }` | 管理双向 TCP 端口转发隧道。支持本地监听映射远端端口（`remote_to_local`）及远端监听映射本地端口（`local_to_remote`）。 |
+| 15 | `forwarding` | `{ action: "add"\|"remove"\|"list", id?: string, protocol?: "tcp"\|"udp", direction?: "remote_to_local"\|"local_to_remote", local_addr?: string, remote_addr?: string }` | 管理双向 TCP/UDP 端口转发隧道。支持本地监听映射远端端口（`remote_to_local`）及远端监听映射本地端口（`local_to_remote`）。 |
 
 ---
 

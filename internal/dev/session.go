@@ -23,14 +23,15 @@ import (
 )
 
 type ForwardEntry struct {
-	ID         string
-	Direction  string // "remote_to_local" | "local_to_remote"
-	MachineID  string
-	LocalAddr  string
-	RemoteAddr string
-	CreatedAt  time.Time
+	ID          string
+	Protocol    string // "tcp" | "udp"
+	Direction   string // "remote_to_local" | "local_to_remote"
+	MachineID   string
+	LocalAddr   string
+	RemoteAddr  string
+	CreatedAt   time.Time
 	ActiveConns int64
-	closeFn    func()
+	closeFn     func()
 }
 
 type SessionConfig struct {
@@ -450,7 +451,7 @@ func (s *Session) Download(remotePath, localPath string) (string, map[string]any
 	}, nil
 }
 
-func (s *Session) Forwarding(action, id, direction, localAddr, remoteAddr string) (string, map[string]any, error) {
+func (s *Session) Forwarding(action, id, proto, direction, localAddr, remoteAddr string) (string, map[string]any, error) {
 	action = strings.ToLower(strings.TrimSpace(action))
 	switch action {
 	case "list", "":
@@ -458,7 +459,7 @@ func (s *Session) Forwarding(action, id, direction, localAddr, remoteAddr string
 	case "remove", "delete", "stop", "close":
 		return s.removeForward(id)
 	case "add", "create", "start":
-		return s.addForward(direction, localAddr, remoteAddr)
+		return s.addForward(proto, direction, localAddr, remoteAddr)
 	default:
 		return "", nil, fmt.Errorf("invalid forwarding action %q: must be \"add\", \"remove\", or \"list\"", action)
 	}
@@ -486,9 +487,14 @@ func (s *Session) listForwards() (string, map[string]any, error) {
 		if f.Direction == "local_to_remote" {
 			arrow = "<-"
 		}
+		protoLabel := f.Protocol
+		if protoLabel == "" {
+			protoLabel = "tcp"
+		}
 		lines = append(lines, fmt.Sprintf(
-			"  #%s  [%s]  local %s %s remote %s  (machine: %s, active_conns: %d)",
+			"  #%s  [%s/%s]  local %s %s remote %s  (machine: %s, active_conns: %d)",
 			f.ID,
+			protoLabel,
 			f.Direction,
 			f.LocalAddr,
 			arrow,
@@ -519,12 +525,25 @@ func (s *Session) removeForward(id string) (string, map[string]any, error) {
 	if entry.closeFn != nil {
 		entry.closeFn()
 	}
+	protoLabel := entry.Protocol
+	if protoLabel == "" {
+		protoLabel = "tcp"
+	}
 	return fmt.Sprintf("Removed port forwarding rule #%s (%s: local %s <-> remote %s)", entry.ID, entry.Direction, entry.LocalAddr, entry.RemoteAddr), map[string]any{
-		"id": entry.ID,
+		"id":       entry.ID,
+		"protocol": protoLabel,
 	}, nil
 }
 
-func (s *Session) addForward(direction, localAddr, remoteAddr string) (string, map[string]any, error) {
+func (s *Session) addForward(proto, direction, localAddr, remoteAddr string) (string, map[string]any, error) {
+	proto = strings.ToLower(strings.TrimSpace(proto))
+	if proto == "" {
+		proto = "tcp"
+	}
+	if proto != "tcp" && proto != "udp" {
+		return "", nil, fmt.Errorf("invalid protocol %q: must be \"tcp\" or \"udp\"", proto)
+	}
+
 	direction = strings.ToLower(strings.TrimSpace(direction))
 	if direction == "" {
 		direction = "remote_to_local"
@@ -552,6 +571,13 @@ func (s *Session) addForward(direction, localAddr, remoteAddr string) (string, m
 		s.SetActiveMachineID(targetMachine)
 	}
 
+	if proto == "udp" {
+		if direction == "remote_to_local" {
+			return s.addRemoteToLocalUDP(targetMachine, localAddr, remoteAddr)
+		}
+		return s.addLocalToRemoteUDP(targetMachine, localAddr, remoteAddr)
+	}
+
 	if direction == "remote_to_local" {
 		return s.addRemoteToLocal(targetMachine, localAddr, remoteAddr)
 	}
@@ -568,6 +594,7 @@ func (s *Session) addRemoteToLocal(machineID, localAddr, remoteAddr string) (str
 
 	entry := &ForwardEntry{
 		ID:         id,
+		Protocol:   "tcp",
 		Direction:  "remote_to_local",
 		MachineID:  machineID,
 		LocalAddr:  boundLocal,
@@ -681,6 +708,7 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 
 	entry := &ForwardEntry{
 		ID:         id,
+		Protocol:   "tcp",
 		Direction:  "local_to_remote",
 		MachineID:  machineID,
 		LocalAddr:  localAddr,
@@ -801,6 +829,381 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 
 	return fmt.Sprintf("Added local_to_remote forwarding #%s: remote %s -> local %s (machine %s)", id, boundRemote, localAddr, machineID), map[string]any{
 		"id":          id,
+		"direction":   "local_to_remote",
+		"local_addr":  localAddr,
+		"remote_addr": boundRemote,
+		"machine_id":  machineID,
+	}, nil
+}
+
+type devUDPSession struct {
+	bs           *protocol.BufferedStream
+	peerAddr     net.Addr
+	toDev        chan []byte
+	done         chan struct{}
+	closeOnce    sync.Once
+	lastActivity int64 // unix timestamp in seconds
+}
+
+func (ds *devUDPSession) Close() {
+	ds.closeOnce.Do(func() {
+		close(ds.done)
+		if ds.bs != nil {
+			_ = ds.bs.Close()
+		}
+	})
+}
+
+func (s *Session) addRemoteToLocalUDP(machineID, localAddr, remoteAddr string) (string, map[string]any, error) {
+	ln, err := net.ListenPacket("udp", localAddr)
+	if err != nil {
+		return "", nil, fmt.Errorf("listen udp on local_addr %s failed: %w", localAddr, err)
+	}
+	boundLocal := ln.LocalAddr().String()
+	id := fmt.Sprintf("%d", atomic.AddUint64(&s.fwdSeq, 1))
+
+	var sessMu sync.Mutex
+	sessions := make(map[string]*devUDPSession)
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+
+	entry := &ForwardEntry{
+		ID:         id,
+		Protocol:   "udp",
+		Direction:  "remote_to_local",
+		MachineID:  machineID,
+		LocalAddr:  boundLocal,
+		RemoteAddr: remoteAddr,
+		CreatedAt:  time.Now(),
+		closeFn: func() {
+			stopOnce.Do(func() {
+				close(stopCh)
+			})
+			_ = ln.Close()
+			sessMu.Lock()
+			for _, ds := range sessions {
+				ds.Close()
+			}
+			sessions = nil
+			sessMu.Unlock()
+		},
+	}
+
+	s.fwdMu.Lock()
+	s.forwards[id] = entry
+	s.fwdMu.Unlock()
+
+	// Periodic cleanup of idle sessions (> 60s)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				now := time.Now().Unix()
+				sessMu.Lock()
+				for k, ds := range sessions {
+					if now-atomic.LoadInt64(&ds.lastActivity) > 60 {
+						ds.Close()
+						delete(sessions, k)
+					}
+				}
+				sessMu.Unlock()
+			}
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, protocol.MaxUDPPacketSize)
+		for {
+			n, peerAddr, err := ln.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			peerKey := peerAddr.String()
+
+			sessMu.Lock()
+			ds, ok := sessions[peerKey]
+			if !ok {
+				bs, sErr := s.openStream()
+				if sErr != nil {
+					sessMu.Unlock()
+					continue
+				}
+				if err := protocol.WriteLineJSON(bs, protocol.StreamHeader{
+					StreamType:      protocol.StreamTypeUDPConnect,
+					TargetMachineID: machineID,
+					RemoteAddr:      remoteAddr,
+				}); err != nil {
+					_ = bs.Close()
+					sessMu.Unlock()
+					continue
+				}
+				var ack protocol.StreamAck
+				if err := bs.ReadLineJSON(&ack); err != nil || !ack.OK {
+					_ = bs.Close()
+					sessMu.Unlock()
+					continue
+				}
+
+				ds = &devUDPSession{
+					bs:           bs,
+					peerAddr:     peerAddr,
+					toDev:        make(chan []byte, 128),
+					done:         make(chan struct{}),
+					lastActivity: time.Now().Unix(),
+				}
+				sessions[peerKey] = ds
+				atomic.AddInt64(&entry.ActiveConns, 1)
+
+				// Stream -> Local UDP packet
+				go func(sess *devUDPSession, key string) {
+					defer atomic.AddInt64(&entry.ActiveConns, -1)
+					defer func() {
+						sessMu.Lock()
+						delete(sessions, key)
+						sessMu.Unlock()
+						sess.Close()
+					}()
+					rBuf := make([]byte, protocol.MaxUDPPacketSize)
+					for {
+						rn, rErr := protocol.ReadPacket(sess.bs, rBuf)
+						if rErr != nil {
+							break
+						}
+						atomic.StoreInt64(&sess.lastActivity, time.Now().Unix())
+						if _, err := ln.WriteTo(rBuf[:rn], sess.peerAddr); err != nil {
+							break
+						}
+					}
+				}(ds, peerKey)
+
+				// Local UDP packet -> Stream
+				go func(sess *devUDPSession) {
+					for {
+						select {
+						case <-sess.done:
+							return
+						case p, open := <-sess.toDev:
+							if !open {
+								return
+							}
+							atomic.StoreInt64(&sess.lastActivity, time.Now().Unix())
+							if err := protocol.WritePacket(sess.bs, p); err != nil {
+								sess.Close()
+								return
+							}
+						}
+					}
+				}(ds)
+			}
+
+			atomic.StoreInt64(&ds.lastActivity, time.Now().Unix())
+			pktCopy := make([]byte, n)
+			copy(pktCopy, buf[:n])
+			select {
+			case ds.toDev <- pktCopy:
+			default:
+			}
+			sessMu.Unlock()
+		}
+	}()
+
+	return fmt.Sprintf("Added remote_to_local forwarding #%s: local %s -> remote %s (machine %s, proto udp)", id, boundLocal, remoteAddr, machineID), map[string]any{
+		"id":          id,
+		"protocol":    "udp",
+		"direction":   "remote_to_local",
+		"local_addr":  boundLocal,
+		"remote_addr": remoteAddr,
+		"machine_id":  machineID,
+	}, nil
+}
+
+func (s *Session) addLocalToRemoteUDP(machineID, localAddr, remoteAddr string) (string, map[string]any, error) {
+	openUDPReverseListen := func(addr string) (*protocol.BufferedStream, string, error) {
+		cs, err := s.openStream()
+		if err != nil {
+			return nil, "", err
+		}
+		if err := protocol.WriteLineJSON(cs, protocol.StreamHeader{
+			StreamType:      protocol.StreamTypeUDPReverseListen,
+			TargetMachineID: machineID,
+			RemoteAddr:      addr,
+		}); err != nil {
+			_ = cs.Close()
+			return nil, "", err
+		}
+		var ack protocol.StreamAck
+		if err := cs.ReadLineJSON(&ack); err != nil {
+			_ = cs.Close()
+			return nil, "", fmt.Errorf("udp reverse_listen handshake failed: %w", err)
+		}
+		if !ack.OK {
+			_ = cs.Close()
+			return nil, "", fmt.Errorf("%s", ack.Error)
+		}
+		bound := ack.BoundAddr
+		if bound == "" {
+			bound = addr
+		}
+		return cs, bound, nil
+	}
+
+	ctrlStream, boundRemote, err := openUDPReverseListen(remoteAddr)
+	if err != nil {
+		return "", nil, err
+	}
+
+	id := fmt.Sprintf("%d", atomic.AddUint64(&s.fwdSeq, 1))
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	var streamMu sync.Mutex
+	curCtrl := ctrlStream
+
+	entry := &ForwardEntry{
+		ID:         id,
+		Protocol:   "udp",
+		Direction:  "local_to_remote",
+		MachineID:  machineID,
+		LocalAddr:  localAddr,
+		RemoteAddr: boundRemote,
+		CreatedAt:  time.Now(),
+		closeFn: func() {
+			stopOnce.Do(func() {
+				close(stopCh)
+			})
+			streamMu.Lock()
+			if curCtrl != nil {
+				_ = curCtrl.Close()
+			}
+			streamMu.Unlock()
+		},
+	}
+
+	s.fwdMu.Lock()
+	s.forwards[id] = entry
+	s.fwdMu.Unlock()
+
+	go func() {
+		defer func() {
+			streamMu.Lock()
+			if curCtrl != nil {
+				_ = curCtrl.Close()
+			}
+			streamMu.Unlock()
+			s.fwdMu.Lock()
+			if cur, ok := s.forwards[id]; ok && cur == entry {
+				delete(s.forwards, id)
+			}
+			s.fwdMu.Unlock()
+		}()
+
+		for {
+			streamMu.Lock()
+			activeStream := curCtrl
+			streamMu.Unlock()
+
+			if activeStream != nil {
+				for {
+					var ev protocol.ReverseConnEvent
+					if err := activeStream.ReadLineJSON(&ev); err != nil {
+						_ = activeStream.Close()
+						break
+					}
+					if ev.ConnID == "" {
+						continue
+					}
+					atomic.AddInt64(&entry.ActiveConns, 1)
+					go func(connID string) {
+						defer atomic.AddInt64(&entry.ActiveConns, -1)
+
+						lconn, err := net.Dial("udp", localAddr)
+						if err != nil {
+							return
+						}
+						defer lconn.Close()
+
+						acceptStream, err := s.openStream()
+						if err != nil {
+							return
+						}
+						defer acceptStream.Close()
+
+						if err := protocol.WriteLineJSON(acceptStream, protocol.StreamHeader{
+							StreamType:      protocol.StreamTypeUDPReverseAccept,
+							TargetMachineID: machineID,
+							ConnID:          connID,
+						}); err != nil {
+							return
+						}
+
+						var aAck protocol.StreamAck
+						if err := acceptStream.ReadLineJSON(&aAck); err != nil || !aAck.OK {
+							return
+						}
+
+						var wg sync.WaitGroup
+						wg.Add(2)
+						// Stream -> Local UDP
+						go func() {
+							defer wg.Done()
+							buf := make([]byte, protocol.MaxUDPPacketSize)
+							for {
+								n, err := protocol.ReadPacket(acceptStream, buf)
+								if err != nil {
+									break
+								}
+								if _, err := lconn.Write(buf[:n]); err != nil {
+									break
+								}
+							}
+							_ = lconn.Close()
+						}()
+						// Local UDP -> Stream
+						go func() {
+							defer wg.Done()
+							buf := make([]byte, protocol.MaxUDPPacketSize)
+							for {
+								n, err := lconn.Read(buf)
+								if err != nil {
+									break
+								}
+								if err := protocol.WritePacket(acceptStream, buf[:n]); err != nil {
+									break
+								}
+							}
+							_ = acceptStream.Close()
+						}()
+						wg.Wait()
+					}(ev.ConnID)
+				}
+			}
+
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(time.Second):
+			}
+
+			nextStream, newBound, reErr := openUDPReverseListen(boundRemote)
+			if reErr != nil && boundRemote != remoteAddr {
+				nextStream, newBound, reErr = openUDPReverseListen(remoteAddr)
+			}
+			streamMu.Lock()
+			curCtrl = nextStream
+			if reErr == nil && newBound != "" {
+				boundRemote = newBound
+				entry.RemoteAddr = newBound
+			}
+			streamMu.Unlock()
+		}
+	}()
+
+	return fmt.Sprintf("Added local_to_remote forwarding #%s: remote %s -> local %s (machine %s, proto udp)", id, boundRemote, localAddr, machineID), map[string]any{
+		"id":          id,
+		"protocol":    "udp",
 		"direction":   "local_to_remote",
 		"local_addr":  localAddr,
 		"remote_addr": boundRemote,

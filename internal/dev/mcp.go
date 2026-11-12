@@ -253,6 +253,7 @@ func (m *MCPServer) dispatchTool(name string, rawArgs json.RawMessage) (string, 
 		var args struct {
 			Action     string `json:"action"`
 			ID         string `json:"id,omitempty"`
+			Protocol   string `json:"protocol,omitempty"`
 			Direction  string `json:"direction,omitempty"`
 			LocalAddr  string `json:"local_addr,omitempty"`
 			RemoteAddr string `json:"remote_addr,omitempty"`
@@ -260,7 +261,7 @@ func (m *MCPServer) dispatchTool(name string, rawArgs json.RawMessage) (string, 
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", nil, err
 		}
-		return m.session.Forwarding(args.Action, args.ID, args.Direction, args.LocalAddr, args.RemoteAddr)
+		return m.session.Forwarding(args.Action, args.ID, args.Protocol, args.Direction, args.LocalAddr, args.RemoteAddr)
 
 	default:
 		return "", nil, fmt.Errorf("unknown tool: %s", name)
@@ -544,7 +545,7 @@ func ToolDefinitions() []MCPToolDefinition {
 		},
 		{
 			Name:        "forwarding",
-			Description: "Manage bidirectional TCP port forwarding tunnels between the developer's local machine and the active remote target machine.",
+			Description: "Manage bidirectional TCP and UDP port forwarding tunnels between the developer's local machine and the active remote target machine.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -557,6 +558,11 @@ func ToolDefinitions() []MCPToolDefinition {
 						"type":        "string",
 						"description": "Tunnel ID (required when action is \"remove\").",
 					},
+					"protocol": map[string]any{
+						"type":        "string",
+						"enum":        []string{"tcp", "udp"},
+						"description": "Transport protocol: \"tcp\" (default) or \"udp\".",
+					},
 					"direction": map[string]any{
 						"type":        "string",
 						"enum":        []string{"remote_to_local", "local_to_remote"},
@@ -564,11 +570,11 @@ func ToolDefinitions() []MCPToolDefinition {
 					},
 					"local_addr": map[string]any{
 						"type":        "string",
-						"description": "Developer machine TCP address (e.g. \"127.0.0.1:8080\" or \"127.0.0.1:0\" for dynamic port).",
+						"description": "Developer machine address (e.g. \"127.0.0.1:8080\" or \"127.0.0.1:0\" for dynamic port).",
 					},
 					"remote_addr": map[string]any{
 						"type":        "string",
-						"description": "Remote target machine TCP address (e.g. \"127.0.0.1:3000\" or \"127.0.0.1:0\").",
+						"description": "Remote target machine address (e.g. \"127.0.0.1:3000\" or \"127.0.0.1:0\").",
 					},
 				},
 				"required": []string{"action"},

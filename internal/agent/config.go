@@ -48,7 +48,6 @@ func LoadPersistentConfig() PersistentConfig {
 		b := make([]byte, 3)
 		_, _ = rand.Read(b)
 		cfg.MachineID = host + "-" + hex.EncodeToString(b)
-		_ = SavePersistentConfig(cfg)
 	}
 	return cfg
 }
