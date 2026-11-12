@@ -18,7 +18,7 @@ const (
 	DefaultJobReadWaitMs     = 5_000
 	MaxJobReadWaitMs         = 60_000
 	StallAfterMs             = 30_000
-	ExitSettleMs             = 150
+	ExitSettleMs             = 200
 	MaxJobs                  = 16
 	LogMaxBytes              = 64 * 1024 * 1024
 	LogRetain                = 20
@@ -47,7 +47,8 @@ type JobRecord struct {
 	CompletedAt  *time.Time
 	Status       JobStatus
 	ExitCode     *int
-	KillReason   string // "", "user", "log_limit"
+	KillReason   string // "", "user", "log_limit", "ttl"
+	LogLimitHit  bool
 	SpawnError   string
 	Promoted     bool
 	Origin       string // "auto" | "explicit"
@@ -64,12 +65,20 @@ func (r *JobRecord) writeOutput(p []byte) (int, error) {
 	r.LastOutputAt = now
 	r.UpdatedAt = now
 	var limitHit bool
+	var pid int
 	if r.buf.Len()+len(p) > LogMaxBytes {
 		remain := LogMaxBytes - r.buf.Len()
 		if remain > 0 {
 			r.buf.Write(p[:remain])
 		}
-		limitHit = true
+		if !r.LogLimitHit {
+			r.LogLimitHit = true
+			r.Status = JobStatusKilled
+			r.KillReason = "log_limit"
+			r.CompletedAt = &now
+			limitHit = true
+			pid = r.PID
+		}
 	} else {
 		r.buf.Write(p)
 	}
@@ -80,7 +89,7 @@ func (r *JobRecord) writeOutput(p []byte) (int, error) {
 	r.mu.Unlock()
 
 	if limitHit {
-		KillProcessTree(r.PID)
+		KillProcessTree(pid)
 	}
 	return len(p), nil
 }
@@ -96,6 +105,7 @@ func (w jobOutputWriter) Write(p []byte) (int, error) {
 type JobRegistry struct {
 	mu      sync.Mutex
 	records map[string]*JobRecord
+	pending map[*JobRecord]struct{}
 	cursors map[string]int
 	nextID  int
 }
@@ -103,6 +113,7 @@ type JobRegistry struct {
 func NewJobRegistry() *JobRegistry {
 	return &JobRegistry{
 		records: make(map[string]*JobRecord),
+		pending: make(map[*JobRecord]struct{}),
 		cursors: make(map[string]int),
 		nextID:  1,
 	}
@@ -111,7 +122,7 @@ func NewJobRegistry() *JobRegistry {
 func (reg *JobRegistry) RunningCount() int {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	count := 0
+	count := len(reg.pending)
 	for _, r := range reg.records {
 		r.mu.Lock()
 		if r.Status == JobStatusRunning {
@@ -179,9 +190,18 @@ func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeout
 		rec.PID = cmd.Process.Pid
 	}
 
+	reg.mu.Lock()
+	reg.pending[rec] = struct{}{}
+	reg.mu.Unlock()
+
 	go func() {
 		err := cmd.Wait()
 		time.Sleep(ExitSettleMs * time.Millisecond)
+
+		reg.mu.Lock()
+		delete(reg.pending, rec)
+		reg.mu.Unlock()
+
 		rec.mu.Lock()
 		nowEnd := time.Now()
 		rec.UpdatedAt = nowEnd
@@ -241,6 +261,7 @@ func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeout
 			exitCode = *rec.ExitCode
 		}
 		spawnErr := rec.SpawnError
+		pid := rec.PID
 		rec.mu.Unlock()
 
 		text := raw
@@ -252,7 +273,13 @@ func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeout
 		} else {
 			text, _ = truncateOutput(text, DefaultMaxReadLines, DefaultMaxReadBytes)
 		}
-		return text, map[string]any{"exit": exitCode, "status": "completed"}, nil
+
+		var parts []string
+		if survivors := IsProcessGroupAlive(pid); survivors != nil && *survivors {
+			parts = append(parts, "<shell_metadata>\nThe tracked process exited but its process group still has running members. They are not tracked as a job; kill them manually if they are not needed.\n</shell_metadata>")
+		}
+		parts = append(parts, text)
+		return strings.Join(parts, "\n\n"), map[string]any{"exit": exitCode, "status": "completed"}, nil
 
 	case <-timer.C:
 		// Timed out -> promote to background job
@@ -266,6 +293,7 @@ func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeout
 
 func (reg *JobRegistry) promote(rec *JobRecord, origin string) {
 	reg.mu.Lock()
+	delete(reg.pending, rec)
 	id := fmt.Sprintf("%d", reg.nextID)
 	reg.nextID++
 	rec.mu.Lock()
@@ -284,9 +312,21 @@ func (reg *JobRegistry) KillAll() {
 	for id := range reg.records {
 		ids = append(ids, id)
 	}
+	pendingRecs := make([]*JobRecord, 0, len(reg.pending))
+	for r := range reg.pending {
+		pendingRecs = append(pendingRecs, r)
+	}
+	reg.pending = make(map[*JobRecord]struct{})
 	reg.mu.Unlock()
+
 	for _, id := range ids {
 		_, _, _ = reg.KillJob(id, nil)
+	}
+	for _, r := range pendingRecs {
+		r.mu.Lock()
+		pid := r.PID
+		r.mu.Unlock()
+		KillProcessTree(pid)
 	}
 }
 
@@ -350,11 +390,8 @@ func (reg *JobRegistry) ListJobs() (string, map[string]any) {
 	now := time.Now()
 	for _, r := range entries {
 		r.mu.Lock()
-		end := now
-		if r.CompletedAt != nil {
-			end = *r.CompletedAt
-		}
-		elapsed := FormatElapsed(end.Sub(r.StartedAt))
+		// describe.ts uses Date.now() - record.startedAt for listReceipt
+		elapsed := FormatElapsed(now.Sub(r.StartedAt))
 		cmdDisplay := displayCommand(r.Command, 60)
 		if r.Status == JobStatusRunning {
 			lines = append(lines, fmt.Sprintf("  #%s  running  %s   %s", r.ID, elapsed, cmdDisplay))
@@ -373,6 +410,26 @@ func (reg *JobRegistry) ListJobs() (string, map[string]any) {
 		"running": running,
 		"max":     MaxJobs,
 	}
+}
+
+func (reg *JobRegistry) settleRunning(rec *JobRecord) bool {
+	rec.mu.Lock()
+	running := rec.Status == JobStatusRunning
+	rec.mu.Unlock()
+	if !running {
+		return false
+	}
+	if ExitSettleMs <= 0 {
+		return true
+	}
+	select {
+	case <-rec.doneCh:
+	case <-time.After(ExitSettleMs * time.Millisecond):
+	}
+	rec.mu.Lock()
+	running = rec.Status == JobStatusRunning
+	rec.mu.Unlock()
+	return running
 }
 
 func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string, map[string]any, error) {
@@ -402,24 +459,35 @@ func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string,
 	for {
 		chunk, nextOffset := reg.readChunk(rec, start, chunkMaxBytes, chunkMaxLines)
 		rec.mu.Lock()
-		running := rec.Status == JobStatusRunning
+		alive := rec.Status == JobStatusRunning
 		silentFor := time.Since(rec.LastOutputAt)
-		totalBytes := rec.buf.Len()
-		status := rec.Status
-		exitCode := rec.ExitCode
 		startedAt := rec.StartedAt
-		completedAt := rec.CompletedAt
 		spawnErr := rec.SpawnError
+		pid := rec.PID
 		rec.mu.Unlock()
 
 		if len(chunk) > 0 {
 			reg.setCursor(id, nextOffset)
+			running := false
+			if alive {
+				running = reg.settleRunning(rec)
+			}
+			rec.mu.Lock()
+			totalBytes := rec.buf.Len()
+			status := rec.Status
+			exitCode := rec.ExitCode
+			rec.mu.Unlock()
+
 			if !running {
 				pending := totalBytes - nextOffset
 				if pending < 0 {
 					pending = 0
 				}
-				return formatExitReceipt(rec, chunk, pending, status == JobStatusKilled), map[string]any{
+				var survivors *bool
+				if status != JobStatusKilled {
+					survivors = IsProcessGroupAlive(pid)
+				}
+				return formatExitReceipt(rec, chunk, pending, status == JobStatusKilled, survivors), map[string]any{
 					"jobId":       id,
 					"status":      string(status),
 					"exit":        exitCode,
@@ -436,12 +504,21 @@ func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string,
 			}, nil
 		}
 
-		if !running {
+		if !alive {
+			rec.mu.Lock()
+			status := rec.Status
+			exitCode := rec.ExitCode
+			rec.mu.Unlock()
+
 			tailText := reg.jobTail(rec, 40, 8192)
 			if tailText == "" {
 				tailText = spawnErr
 			}
-			return formatExitReceipt(rec, tailText, 0, status == JobStatusKilled), map[string]any{
+			var survivors *bool
+			if status != JobStatusKilled {
+				survivors = IsProcessGroupAlive(pid)
+			}
+			return formatExitReceipt(rec, tailText, 0, status == JobStatusKilled, survivors), map[string]any{
 				"jobId":       id,
 				"status":      string(status),
 				"exit":        exitCode,
@@ -450,6 +527,30 @@ func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string,
 		}
 
 		if time.Now().After(deadline) {
+			running := reg.settleRunning(rec)
+			rec.mu.Lock()
+			status := rec.Status
+			exitCode := rec.ExitCode
+			completedAt := rec.CompletedAt
+			rec.mu.Unlock()
+
+			if !running {
+				tailText := reg.jobTail(rec, 40, 8192)
+				if tailText == "" {
+					tailText = spawnErr
+				}
+				var survivors *bool
+				if status != JobStatusKilled {
+					survivors = IsProcessGroupAlive(pid)
+				}
+				return formatExitReceipt(rec, tailText, 0, status == JobStatusKilled, survivors), map[string]any{
+					"jobId":       id,
+					"status":      string(status),
+					"exit":        exitCode,
+					"next_offset": start,
+				}, nil
+			}
+
 			if silentFor.Milliseconds() >= StallAfterMs {
 				silentSec := int(silentFor.Seconds())
 				return fmt.Sprintf("job #%s stalled - no output for %ds. job_kill it or wait longer.", id, silentSec), map[string]any{
@@ -506,8 +607,9 @@ func (reg *JobRegistry) KillJob(id string, onStateChange func()) (string, map[st
 		KillProcessTree(pid)
 		select {
 		case <-rec.doneCh:
-		case <-time.After(2 * time.Second):
+		case <-time.After(3 * time.Second):
 		}
+		reg.prune()
 		if onStateChange != nil {
 			onStateChange()
 		}
@@ -543,6 +645,9 @@ func (reg *JobRegistry) KillJob(id string, onStateChange func()) (string, map[st
 
 	if priorStatus == JobStatusRunning && status == JobStatusKilled {
 		lines := []string{fmt.Sprintf("job #%s killed (%s).", id, KillTargetDescription(pid))}
+		if survivors := IsProcessGroupAlive(pid); survivors != nil && *survivors {
+			lines = append(lines, "Note: some process group members are still alive; the kill did not reach them.")
+		}
 		if pending > 0 {
 			lines = append(lines, fmt.Sprintf("%d bytes unread - call job_read again.", pending))
 		}
@@ -553,10 +658,14 @@ func (reg *JobRegistry) KillJob(id string, onStateChange func()) (string, map[st
 		return strings.Join(lines, "\n"), meta, nil
 	}
 
-	return formatExitReceipt(rec, body, pending, status == JobStatusKilled), meta, nil
+	var survivors *bool
+	if status != JobStatusKilled {
+		survivors = IsProcessGroupAlive(pid)
+	}
+	return formatExitReceipt(rec, body, pending, status == JobStatusKilled, survivors), meta, nil
 }
 
-func formatExitReceipt(rec *JobRecord, body string, pendingBytes int, killed bool) string {
+func formatExitReceipt(rec *JobRecord, body string, pendingBytes int, killed bool, groupSurvivors *bool) string {
 	rec.mu.Lock()
 	end := time.Now()
 	if rec.CompletedAt != nil {
@@ -570,8 +679,11 @@ func formatExitReceipt(rec *JobRecord, body string, pendingBytes int, killed boo
 		codeStr = fmt.Sprintf("%d", *rec.ExitCode)
 	}
 	reason := ""
-	if rec.KillReason == "log_limit" {
+	switch rec.KillReason {
+	case "log_limit":
 		reason = " (log limit)"
+	case "ttl":
+		reason = " (ttl)"
 	}
 	id := rec.ID
 	rec.mu.Unlock()
@@ -581,6 +693,9 @@ func formatExitReceipt(rec *JobRecord, body string, pendingBytes int, killed boo
 		lines = append(lines, fmt.Sprintf("job #%s killed after %s%s", id, elapsed, reason))
 	} else {
 		lines = append(lines, fmt.Sprintf("job #%s exited with code %s after %s", id, codeStr, elapsed))
+	}
+	if groupSurvivors != nil && *groupSurvivors {
+		lines = append(lines, "Note: the tracked process exited but its process group still has running members; they are not tracked, kill them manually if needed.")
 	}
 	if pendingBytes > 0 {
 		lines = append(lines, fmt.Sprintf("%d bytes unread - call job_read again.", pendingBytes))
@@ -609,8 +724,8 @@ func (reg *JobRegistry) readChunk(rec *JobRecord, offset, maxBytes, maxLines int
 		take = maxBytes
 	}
 	slice := data[offset : offset+take]
-	// Avoid splitting multi-byte UTF-8 rune at boundary
-	for len(slice) > 0 && !utf8.Valid(slice) {
+	// Avoid splitting multi-byte UTF-8 rune at boundary (up to 4 bytes)
+	for i := 0; i < 4 && len(slice) > 0 && !utf8.Valid(slice); i++ {
 		slice = slice[:len(slice)-1]
 	}
 	text := string(slice)
@@ -628,25 +743,65 @@ func (reg *JobRegistry) readChunk(rec *JobRecord, offset, maxBytes, maxLines int
 	}
 	advance := len(text)
 	if advance == 0 && take > 0 {
+		advance = 1
+	}
+	if advance > take {
 		advance = take
 	}
 	return text, offset + advance
 }
 
+// jobTail mirrors background-jobs/lib/truncate.ts tail()
 func (reg *JobRegistry) jobTail(rec *JobRecord, maxLines, maxBytes int) string {
 	rec.mu.Lock()
 	data := rec.buf.Bytes()
 	if len(data) > maxBytes {
-		data = data[len(data)-maxBytes:]
+		start := len(data) - maxBytes
+		slice := data[start:]
+		if idx := bytes.IndexByte(slice, '\n'); idx >= 0 {
+			slice = slice[idx+1:]
+		} else {
+			for len(slice) > 0 && (slice[0]&0xc0) == 0x80 {
+				slice = slice[1:]
+			}
+		}
+		data = slice
 	}
 	text := string(data)
 	rec.mu.Unlock()
 
 	lines := strings.Split(text, "\n")
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
+	if len(lines) <= maxLines && len(text) <= maxBytes {
+		return text
 	}
-	return strings.Join(lines, "\n")
+	var out []string
+	bytesCount := 0
+	for i := len(lines) - 1; i >= 0 && len(out) < maxLines; i-- {
+		sz := len(lines[i])
+		if len(out) > 0 {
+			sz++
+		}
+		if bytesCount+sz > maxBytes {
+			if len(out) == 0 {
+				b := []byte(lines[i])
+				st := len(b) - maxBytes
+				if st < 0 {
+					st = 0
+				}
+				for st < len(b) && (b[st]&0xc0) == 0x80 {
+					st++
+				}
+				out = append(out, string(b[st:]))
+			}
+			break
+		}
+		out = append(out, lines[i])
+		bytesCount += sz
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return strings.Join(out, "\n")
 }
 
 func (reg *JobRegistry) get(id string) *JobRecord {

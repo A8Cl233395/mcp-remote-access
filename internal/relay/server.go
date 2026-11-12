@@ -2,6 +2,7 @@ package relay
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -51,11 +52,19 @@ func (a *AgentSession) UpdateInfo(info protocol.MachineInfo) {
 	a.Info = info
 }
 
+type cachedManifest struct {
+	modTime int64
+	size    int64
+	sha256  string
+}
+
 type Server struct {
-	cfg      Config
-	upgrader websocket.Upgrader
-	mu       sync.RWMutex
-	agents   map[string]*AgentSession
+	cfg           Config
+	upgrader      websocket.Upgrader
+	mu            sync.RWMutex
+	agents        map[string]*AgentSession
+	manifestMu    sync.Mutex
+	manifestCache map[string]cachedManifest
 }
 
 func NewServer(cfg Config) *Server {
@@ -72,7 +81,8 @@ func NewServer(cfg Config) *Server {
 			WriteBufferSize: 64 * 1024,
 			CheckOrigin:     func(r *http.Request) bool { return true },
 		},
-		agents: make(map[string]*AgentSession),
+		agents:        make(map[string]*AgentSession),
+		manifestCache: make(map[string]cachedManifest),
 	}
 }
 
@@ -91,7 +101,7 @@ func (s *Server) checkUserAuth(r *http.Request) bool {
 	if key == "" {
 		key = r.URL.Query().Get("key")
 	}
-	return s.cfg.UserKey != "" && key == s.cfg.UserKey
+	return s.cfg.UserKey != "" && subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.UserKey)) == 1
 }
 
 func (s *Server) checkDevAuth(r *http.Request) bool {
@@ -99,7 +109,7 @@ func (s *Server) checkDevAuth(r *http.Request) bool {
 	if key == "" {
 		key = r.URL.Query().Get("key")
 	}
-	return s.cfg.DevKey != "" && key == s.cfg.DevKey
+	return s.cfg.DevKey != "" && subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.DevKey)) == 1
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +120,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) resolveReleaseBinary(goos, goarch string) (string, string, error) {
 	if goos == "" || goarch == "" {
 		return "", "", fmt.Errorf("missing os or arch")
+	}
+	if goarch == "i386" || goarch == "x86" {
+		goarch = "386"
+	}
+	if goos == "windows7" || goos == "win7" {
+		goos = "windows"
 	}
 	ext := ""
 	if goos == "windows" {
@@ -145,6 +161,27 @@ func (s *Server) handleUpdateManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	st, err := os.Stat(fullPath)
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(protocol.UpdateManifest{Available: false})
+		return
+	}
+	modNano := st.ModTime().UnixNano()
+	fileSize := st.Size()
+
+	s.manifestMu.Lock()
+	if cached, ok := s.manifestCache[fullPath]; ok && cached.modTime == modNano && cached.size == fileSize {
+		s.manifestMu.Unlock()
+		_ = json.NewEncoder(w).Encode(protocol.UpdateManifest{
+			Available: true,
+			Filename:  filename,
+			SHA256:    cached.sha256,
+			Size:      cached.size,
+		})
+		return
+	}
+	s.manifestMu.Unlock()
+
 	f, err := os.Open(fullPath)
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(protocol.UpdateManifest{Available: false})
@@ -158,11 +195,20 @@ func (s *Server) handleUpdateManifest(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(protocol.UpdateManifest{Available: false})
 		return
 	}
+	shaHex := hex.EncodeToString(hasher.Sum(nil))
+
+	s.manifestMu.Lock()
+	s.manifestCache[fullPath] = cachedManifest{
+		modTime: modNano,
+		size:    size,
+		sha256:  shaHex,
+	}
+	s.manifestMu.Unlock()
 
 	_ = json.NewEncoder(w).Encode(protocol.UpdateManifest{
 		Available: true,
 		Filename:  filename,
-		SHA256:    hex.EncodeToString(hasher.Sum(nil)),
+		SHA256:    shaHex,
 		Size:      size,
 	})
 }

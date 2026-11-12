@@ -41,6 +41,10 @@ func KillTargetDescription(pid int) string {
 	return fmt.Sprintf("process tree of pid %d, best-effort", pid)
 }
 
+func IsProcessGroupAlive(pid int) *bool {
+	return nil
+}
+
 func CheckIsAdmin() bool {
 	// Attempt to open physical drive or check token elevation via net session
 	f, err := syscall.Open(`\\.\PHYSICALDRIVE0`, syscall.O_RDONLY, 0)

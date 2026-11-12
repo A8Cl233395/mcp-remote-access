@@ -18,7 +18,12 @@ type PersistentConfig struct {
 	Workdir    string `json:"workdir,omitempty"`
 }
 
+var configPathOverride string
+
 func ConfigFilePath() string {
+	if configPathOverride != "" {
+		return configPathOverride
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil || dir == "" {
 		dir = os.TempDir()

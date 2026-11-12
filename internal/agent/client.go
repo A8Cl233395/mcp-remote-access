@@ -109,11 +109,29 @@ func NewClient(opts ClientOptions) *Client {
 func (c *Client) Close() {
 	c.wakeLock.Release()
 	c.jobs.KillAll()
+	c.revMu.Lock()
+	for id, conn := range c.pendingRevConns {
+		delete(c.pendingRevConns, id)
+		_ = conn.Close()
+	}
+	c.revMu.Unlock()
 	c.mu.Lock()
 	if c.session != nil {
 		_ = c.session.Close()
 	}
 	c.mu.Unlock()
+}
+
+func (c *Client) SetUserKey(userKey string) {
+	c.mu.Lock()
+	c.opts.UserKey = userKey
+	c.mu.Unlock()
+}
+
+func (c *Client) GetUserKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.opts.UserKey
 }
 
 func (c *Client) setStatus(msg string) {
@@ -213,7 +231,7 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		if c.opts.AutoUpdate {
-			_ = SelfUpdateAndRestart(c.opts.ServerAddr, c.opts.UserKey, c.opts.Insecure, c.opts.OnStatus)
+			_ = SelfUpdateAndRestart(c.opts.ServerAddr, c.GetUserKey(), c.opts.Insecure, c.opts.OnStatus)
 		}
 
 		err := c.connectAndServe(ctx)
@@ -247,7 +265,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		TLSClientConfig:  BuildClientTLSConfig(c.opts.Insecure),
 	}
 	headers := http.Header{}
-	headers.Set(protocol.HeaderUserKey, c.opts.UserKey)
+	headers.Set(protocol.HeaderUserKey, c.GetUserKey())
 
 	ws, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil && c.opts.Insecure && strings.HasPrefix(wsURL, "wss://") {

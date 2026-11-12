@@ -27,10 +27,10 @@
 ## 2. 参考基准实现
 
 1. **基础文件工具 (`read`, `write`, `edit`, `glob`, `grep`)**
-   - 对齐 OpenCode 核心实现：`C:\Temp-Backup\opencode\packages\core\src\tool\plugin\{read,write,edit,glob,grep}.ts` 及 `read-filesystem.ts`。
+   - 对齐 OpenCode 核心实现：`packages/core/src/tool/plugin/{read,write,edit,glob,grep}.ts` 及 `read-filesystem.ts`。
    - 保持一致的参数定义、行号格式（`<line>: <content>`）、分页截断提示、`edit` 的三层容错匹配（精确匹配 -> Unicode 标点/空格归一化 -> 行尾空白忽略）与换行符（CRLF/LF）保持逻辑。
 2. **命令与后台任务工具 (`shell`, `job_list`, `job_read`, `job_kill`)**
-   - 对齐 OpenCode 后台任务插件：`C:\Users\h_a_p\.config\opencode\plugin\background-jobs\lib\{tools,jobs,describe,shell,spawn,truncate,config}.ts`。
+   - 对齐 OpenCode 后台任务插件：`plugin/background-jobs/lib/{tools,jobs,describe,shell,spawn,truncate,config}.ts`。
    - 保持一致的前台等待转后台机制（默认 30s 超时自动转后台，`timeout: 0` 立即转后台并等待最多 3s 首包输出）、增量字节游标（`next_offset`）、静默卡死检测（`stalled`）及进程树清理（Windows `taskkill /f /t` / Linux `-pgid`）。
 
 ---

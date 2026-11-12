@@ -66,6 +66,12 @@ const (
 	wsTabStop          = 0x00010000
 	esAutoHScroll      = 0x0080
 	bsPushButton       = 0x00000000
+	bsAutoCheckbox     = 0x00000003
+
+	bmGetCheck         = 0x00F0
+	bmSetCheck         = 0x00F1
+	bstUnchecked       = 0
+	bstChecked         = 1
 
 	wmCreate  = 0x0001
 	wmDestroy = 0x0002
@@ -80,6 +86,7 @@ const (
 	idEditKey       = 102
 	idBtnConnect    = 103
 	idStaticStatus  = 104
+	idCheckSaveKey  = 105
 )
 
 type wndClassExW struct {
@@ -115,10 +122,12 @@ var (
 	hwndMain       syscall.Handle
 	hwndServerEdit syscall.Handle
 	hwndKeyEdit    syscall.Handle
+	hwndSaveKeyChk syscall.Handle
 	hwndBtnConnect syscall.Handle
 	hwndStatus     syscall.Handle
 	latestStatus   string
 	guiCancel      context.CancelFunc
+	guiClient      *Client
 	guiBaseOpts    ClientOptions
 )
 
@@ -140,7 +149,30 @@ func getWindowText(hwnd syscall.Handle) string {
 	return syscall.UTF16ToString(buf)
 }
 
-func startOrRestartAgent(userKey string) {
+func startOrRestartAgent(userKey string, saveKey bool) {
+	userKey = strings.TrimSpace(userKey)
+	if userKey == "" {
+		guiMu.Lock()
+		if guiCancel != nil {
+			guiCancel()
+			guiCancel = nil
+		}
+		guiMu.Unlock()
+		updateGUIStatus("Status: Please enter Connection Key.")
+		return
+	}
+
+	pCfg := LoadPersistentConfig()
+	if saveKey {
+		pCfg.UserKey = userKey
+	} else {
+		pCfg.UserKey = ""
+	}
+	if guiBaseOpts.MachineID != "" {
+		pCfg.MachineID = guiBaseOpts.MachineID
+	}
+	_ = SavePersistentConfig(pCfg)
+
 	guiMu.Lock()
 	if guiCancel != nil {
 		guiCancel()
@@ -148,31 +180,23 @@ func startOrRestartAgent(userKey string) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	guiCancel = cancel
-	opts := guiBaseOpts
+
+	if guiClient == nil {
+		opts := guiBaseOpts
+		opts.UserKey = userKey
+		if opts.MachineID == "" {
+			opts.MachineID = pCfg.MachineID
+		}
+		opts.OnStatus = func(st string) {
+			updateGUIStatus("Status: " + st)
+		}
+		guiClient = NewClient(opts)
+	} else {
+		guiClient.SetUserKey(userKey)
+	}
+	client := guiClient
 	guiMu.Unlock()
 
-	userKey = strings.TrimSpace(userKey)
-	if userKey == "" {
-		updateGUIStatus("Status: Please enter Connection Key.")
-		return
-	}
-
-	pCfg := LoadPersistentConfig()
-	pCfg.UserKey = userKey
-	if opts.MachineID != "" {
-		pCfg.MachineID = opts.MachineID
-	}
-	_ = SavePersistentConfig(pCfg)
-
-	opts.UserKey = userKey
-	if opts.MachineID == "" {
-		opts.MachineID = pCfg.MachineID
-	}
-	opts.OnStatus = func(st string) {
-		updateGUIStatus("Status: " + st)
-	}
-
-	client := NewClient(opts)
 	go func() {
 		_ = client.Run(ctx)
 	}()
@@ -209,18 +233,30 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 			return syscall.Handle(hCtrl)
 		}
 
-		createCtrl("STATIC", "Connection Key:", wsChild|wsVisible, 16, 22, 95, 22, 0)
-		hwndKeyEdit = createCtrl("EDIT", guiBaseOpts.UserKey, wsChild|wsVisible|wsBorder|wsTabStop|esAutoHScroll, 115, 19, 285, 24, idEditKey)
+		createCtrl("STATIC", "Connection Key:", wsChild|wsVisible, 16, 20, 95, 22, 0)
+		hwndKeyEdit = createCtrl("EDIT", guiBaseOpts.UserKey, wsChild|wsVisible|wsBorder|wsTabStop|esAutoHScroll, 115, 18, 285, 24, idEditKey)
 
-		hwndBtnConnect = createCtrl("BUTTON", "Connect / Save", wsChild|wsVisible|wsTabStop|bsPushButton, 115, 56, 140, 30, idBtnConnect)
-		hwndStatus = createCtrl("STATIC", "Status: Idle", wsChild|wsVisible, 16, 100, 385, 44, idStaticStatus)
+		hwndSaveKeyChk = createCtrl("BUTTON", "Save Key", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 115, 48, 120, 22, idCheckSaveKey)
+		initCheck := bstChecked
+		pCfg := LoadPersistentConfig()
+		if pCfg.UserKey == "" && strings.TrimSpace(guiBaseOpts.UserKey) == "" {
+			initCheck = bstChecked
+		} else if pCfg.UserKey == "" && strings.TrimSpace(guiBaseOpts.UserKey) != "" {
+			initCheck = bstChecked
+		}
+		_, _, _ = procSendMessageW.Call(uintptr(hwndSaveKeyChk), bmSetCheck, uintptr(initCheck), 0)
+
+		hwndBtnConnect = createCtrl("BUTTON", "Connect", wsChild|wsVisible|wsTabStop|bsPushButton, 115, 76, 120, 28, idBtnConnect)
+		hwndStatus = createCtrl("STATIC", "Status: Idle", wsChild|wsVisible, 16, 112, 385, 44, idStaticStatus)
 		return 0
 
 	case wmCommand:
 		id := wParam & 0xFFFF
 		if id == idBtnConnect {
 			key := getWindowText(hwndKeyEdit)
-			startOrRestartAgent(key)
+			checkState, _, _ := procSendMessageW.Call(uintptr(hwndSaveKeyChk), bmGetCheck, 0, 0)
+			saveKey := checkState == bstChecked
+			startOrRestartAgent(key, saveKey)
 			return 0
 		}
 
@@ -235,8 +271,14 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		guiMu.Lock()
 		if guiCancel != nil {
 			guiCancel()
+			guiCancel = nil
 		}
+		cl := guiClient
+		guiClient = nil
 		guiMu.Unlock()
+		if cl != nil {
+			cl.Close()
+		}
 		_, _, _ = procPostQuitMessage.Call(0)
 		return 0
 	}
@@ -270,7 +312,7 @@ func RunGUI(opts ClientOptions) error {
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(title)),
 		wsOverlappedWindow|wsVisible,
-		250, 250, 435, 190,
+		250, 250, 435, 210,
 		0, 0, hInst, 0,
 	)
 	hwndMain = syscall.Handle(h)
@@ -278,7 +320,7 @@ func RunGUI(opts ClientOptions) error {
 	_, _, _ = procUpdateWindow.Call(h)
 
 	if strings.TrimSpace(opts.UserKey) != "" {
-		startOrRestartAgent(opts.UserKey)
+		startOrRestartAgent(opts.UserKey, true)
 	} else {
 		updateGUIStatus("Status: Enter Connection Key and click Connect.")
 	}

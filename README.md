@@ -1,4 +1,4 @@
-# MCP Remote Access (`mcp-remoteaccess`)
+# MCP Remote Access (`mcp-remote-access`)
 
 专为 AI Agent（OpenCode / Claude Desktop 等）设计的免配置远程机器控制、文件流传输与双向端口穿透套件。
 
@@ -26,15 +26,21 @@
 
 ### 1. 使用 `build.ps1` 一键编译
 
-- **使用内置默认服务器地址（`127.0.0.1:20055`）编译**：
+- **自动从 `.env` 读取公网服务器地址（推荐）**：
+  复制 `.env.example` 为 `.env`，填入你的中继服务器地址：
+  ```env
+  DEFAULT_SERVER=example.com:20055
+  ```
+  然后直接执行脚本，脚本会自动读取并注入：
   ```powershell
   .\build.ps1
   ```
-- **编译期注入自定义默认公网服务器地址（推荐）**：
-  因为用户客户端 GUI 不允许用户查看或修改服务器地址，你可以在打包分发前通过 `-DefaultServer` 将你的公网域名（或 IP）直接编译进二进制：
+- **命令行传参注入自定义服务器地址**：
   ```powershell
   .\build.ps1 -DefaultServer "example.com:20055"
   ```
+- **使用本地缺省地址（`127.0.0.1:20055`）**：
+  若未配置 `.env` 且未传参，默认使用本地回环地址。
   > 若省略端口（如 `-DefaultServer "example.com"`），客户端运行时也会自动补齐默认端口 `:20055`。
 
 ### 2. 手动 `go build` 与 `-ldflags` 编译选项详解
@@ -182,6 +188,9 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
 10. `job_list`：列出远程后台任务。
 11. `job_read`：增量字节游标（`next_offset`）读取后台任务输出，支持 `stalled` 检测。
 12. `job_kill`：强制终止远程后台任务及其子进程树。
+
+> **注**：命令与后台任务相关工具（9~12）参考了 [**`opencode-background-jobs`**](https://github.com/A8Cl233395/opencode-background-jobs)，在远程机器上同样支持超时自动转后台、断线不丢任务、增量拉取输出和进程树清理。
+
 13. `upload`：从开发者本机流式上传文件或整个目录到远程目标机（含 SHA256 校验）。
 14. `download`：从远程目标机流式下载文件或整个目录到开发者本机（含 SHA256 校验）。
 15. `forwarding`：统一管理双向 TCP 端口转发（`action: "add" | "remove" | "list"`，支持 `remote_to_local` 与 `local_to_remote`）。

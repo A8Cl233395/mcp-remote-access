@@ -35,6 +35,15 @@ func KillTargetDescription(pid int) string {
 	return fmt.Sprintf("process group %d", pid)
 }
 
+func IsProcessGroupAlive(pid int) *bool {
+	if pid <= 0 {
+		return nil
+	}
+	err := syscall.Kill(-pid, 0)
+	alive := err == nil || err == syscall.EPERM
+	return &alive
+}
+
 func CheckIsAdmin() bool {
 	return os.Geteuid() == 0
 }

@@ -732,4 +732,83 @@ func TestTLSStrictCertificateVerification(t *testing.T) {
 	}
 }
 
+func TestOpenCodeToolAlignmentDetails(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Test edit Tier-2 Unicode normalization with multi-byte UTF-8 quotes/dashes/spaces (inline match)
+	unicodeFile := filepath.Join(tempDir, "unicode.txt")
+	origUnicode := "const msg = “Hello—World\u00A0!”;\r\nconst second = 'keep';\n"
+	if err := os.WriteFile(unicodeFile, []byte(origUnicode), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Replace only the inline substring using ASCII quotes, hyphen, and space;
+	// verify Tier-2 matches and mixed line endings (\r\n on line 1, \n on line 2) are preserved!
+	out, _, err := agent.EditFile("unicode.txt", `"Hello-World !"`, `"Hi-OpenCode"`, false, tempDir)
+	if err != nil || !strings.Contains(out, "1 replacement") {
+		t.Fatalf("Tier-2 Unicode inline edit failed: %s (%v)", out, err)
+	}
+	editedBytes, _ := os.ReadFile(unicodeFile)
+	expectedUnicode := "const msg = \"Hi-OpenCode\";\r\nconst second = 'keep';\n"
+	if string(editedBytes) != expectedUnicode {
+		t.Fatalf("mixed line endings or content not preserved: got %q, want %q", string(editedBytes), expectedUnicode)
+	}
+
+	// 2. Test edit voting missHint when first line has a typo but subsequent lines match
+	votingFile := filepath.Join(tempDir, "voting.go")
+	votingSrc := "package main\n\nfunc alpha() {\n\tx := 1\n\ty := 2\n\tz := 3\n}\n"
+	_ = os.WriteFile(votingFile, []byte(votingSrc), 0644)
+	_, _, err = agent.EditFile("voting.go", "func wrongName() {\n\tx := 1\n\ty := 2\n}", "func alpha() {}", false, tempDir)
+	if err == nil || !strings.Contains(err.Error(), "The closest lines in the file:") || !strings.Contains(err.Error(), "4: \tx := 1") {
+		t.Fatalf("expected voting missHint to locate lines 4-6, got: %v", err)
+	}
+
+	// 3. Test read alternatePath (curly apostrophe in filename) and "Did you mean" suggestions
+	curlyName := "user\u2019s-guide.md"
+	_ = os.WriteFile(filepath.Join(tempDir, curlyName), []byte("guide content\n"), 0644)
+	readOut, _, err := agent.ReadFileOrDir("user's-guide.md", tempDir, nil, nil)
+	if err != nil || !strings.Contains(readOut, "1: guide content") {
+		t.Fatalf("expected alternatePath to resolve curly apostrophe filename, got: %s (%v)", readOut, err)
+	}
+
+	// Missing file with similar name suggestion
+	_, _, err = agent.ReadFileOrDir("guide.md", tempDir, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "Did you mean one of these?") || !strings.Contains(err.Error(), curlyName) {
+		t.Fatalf("expected Did you mean suggestion for missing file, got: %v", err)
+	}
+
+	// Missing folder with nearest existing parent suggestion
+	_, _, err = agent.ReadFileOrDir("nonexistent-dir/sub/file.txt", tempDir, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "The nearest folder that does is") {
+		t.Fatalf("expected nearest existing folder hint, got: %v", err)
+	}
+
+	// 4. Test multi-chunk streaming read on a file larger than FirstReadChunk (256KB)
+	largeFile := filepath.Join(tempDir, "large.log")
+	var sb strings.Builder
+	for i := 1; i <= 6000; i++ {
+		fmt.Fprintf(&sb, "line-%04d: %s\n", i, strings.Repeat("x", 60))
+	}
+	if err := os.WriteFile(largeFile, []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+	offset := 5500
+	limit := 10
+	pageOut, meta, err := agent.ReadFileOrDir("large.log", tempDir, &offset, &limit)
+	if err != nil || !strings.Contains(pageOut, "5500: line-5500:") || !strings.Contains(pageOut, "5509: line-5509:") {
+		t.Fatalf("multi-chunk streaming read failed: %s (%v)", pageOut, err)
+	}
+	if meta["truncated"] != true {
+		t.Fatalf("expected truncated=true on page 5500..5509 of 6000, got: %+v", meta)
+	}
+
+	// 5. Test grep on hidden directory (.github/workflows/ci.yml)
+	hiddenWorkflowDir := filepath.Join(tempDir, ".github", "workflows")
+	_ = os.MkdirAll(hiddenWorkflowDir, 0755)
+	_ = os.WriteFile(filepath.Join(hiddenWorkflowDir, "ci.yml"), []byte("name: secret-ci-token\n"), 0644)
+	grepOut, _, err := agent.GrepFiles(tempDir, "secret-ci-token", "", "", true, true, 10)
+	if err != nil || !strings.Contains(grepOut, "Found 1 matches") || !strings.Contains(grepOut, "ci.yml") {
+		t.Fatalf("expected grep to search .github directory, got: %s (%v)", grepOut, err)
+	}
+}
+
 

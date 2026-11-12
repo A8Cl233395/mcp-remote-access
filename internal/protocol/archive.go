@@ -51,6 +51,9 @@ func ReceiveFileToDisk(dstPath string, r io.Reader, size int64) (int64, string, 
 	if err != nil {
 		return n, "", err
 	}
+	if size >= 0 && n < size {
+		return n, "", fmt.Errorf("unexpected EOF while receiving file: got %d of %d bytes", n, size)
+	}
 	return n, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
@@ -103,12 +106,10 @@ func PackDirToStream(srcDir string, w io.Writer) (int64, int, string, error) {
 		return nil
 	})
 	if err != nil {
-		_ = tw.Close()
-		_ = gw.Close()
+		// Do not write valid tar/gzip EOF trailers on error so receiver detects truncated stream
 		return totalBytes, fileCount, "", err
 	}
 	if err := tw.Close(); err != nil {
-		_ = gw.Close()
 		return totalBytes, fileCount, "", err
 	}
 	if err := gw.Close(); err != nil {

@@ -639,35 +639,45 @@ func (s *Session) addRemoteToLocal(machineID, localAddr, remoteAddr string) (str
 }
 
 func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (string, map[string]any, error) {
-	ctrlStream, err := s.openStream()
+	openReverseListen := func(addr string) (*protocol.BufferedStream, string, error) {
+		cs, err := s.openStream()
+		if err != nil {
+			return nil, "", err
+		}
+		if err := protocol.WriteLineJSON(cs, protocol.StreamHeader{
+			StreamType:      protocol.StreamTypeReverseListen,
+			TargetMachineID: machineID,
+			RemoteAddr:      addr,
+		}); err != nil {
+			_ = cs.Close()
+			return nil, "", err
+		}
+		var ack protocol.StreamAck
+		if err := cs.ReadLineJSON(&ack); err != nil {
+			_ = cs.Close()
+			return nil, "", fmt.Errorf("reverse_listen handshake failed: %w", err)
+		}
+		if !ack.OK {
+			_ = cs.Close()
+			return nil, "", fmt.Errorf("%s", ack.Error)
+		}
+		bound := ack.BoundAddr
+		if bound == "" {
+			bound = addr
+		}
+		return cs, bound, nil
+	}
+
+	ctrlStream, boundRemote, err := openReverseListen(remoteAddr)
 	if err != nil {
 		return "", nil, err
 	}
 
-	if err := protocol.WriteLineJSON(ctrlStream, protocol.StreamHeader{
-		StreamType:      protocol.StreamTypeReverseListen,
-		TargetMachineID: machineID,
-		RemoteAddr:      remoteAddr,
-	}); err != nil {
-		_ = ctrlStream.Close()
-		return "", nil, err
-	}
-
-	var ack protocol.StreamAck
-	if err := ctrlStream.ReadLineJSON(&ack); err != nil {
-		_ = ctrlStream.Close()
-		return "", nil, fmt.Errorf("reverse_listen handshake failed: %w", err)
-	}
-	if !ack.OK {
-		_ = ctrlStream.Close()
-		return "", nil, fmt.Errorf("%s", ack.Error)
-	}
-
-	boundRemote := ack.BoundAddr
-	if boundRemote == "" {
-		boundRemote = remoteAddr
-	}
 	id := fmt.Sprintf("%d", atomic.AddUint64(&s.fwdSeq, 1))
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	var streamMu sync.Mutex
+	curCtrl := ctrlStream
 
 	entry := &ForwardEntry{
 		ID:         id,
@@ -677,7 +687,14 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 		RemoteAddr: boundRemote,
 		CreatedAt:  time.Now(),
 		closeFn: func() {
-			_ = ctrlStream.Close()
+			stopOnce.Do(func() {
+				close(stopCh)
+			})
+			streamMu.Lock()
+			if curCtrl != nil {
+				_ = curCtrl.Close()
+			}
+			streamMu.Unlock()
 		},
 	}
 
@@ -687,7 +704,11 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 
 	go func() {
 		defer func() {
-			_ = ctrlStream.Close()
+			streamMu.Lock()
+			if curCtrl != nil {
+				_ = curCtrl.Close()
+			}
+			streamMu.Unlock()
 			s.fwdMu.Lock()
 			if cur, ok := s.forwards[id]; ok && cur == entry {
 				delete(s.forwards, id)
@@ -696,56 +717,85 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 		}()
 
 		for {
-			var ev protocol.ReverseConnEvent
-			if err := ctrlStream.ReadLineJSON(&ev); err != nil {
+			streamMu.Lock()
+			activeStream := curCtrl
+			streamMu.Unlock()
+
+			if activeStream != nil {
+				for {
+					var ev protocol.ReverseConnEvent
+					if err := activeStream.ReadLineJSON(&ev); err != nil {
+						_ = activeStream.Close()
+						break
+					}
+					if ev.ConnID == "" {
+						continue
+					}
+					atomic.AddInt64(&entry.ActiveConns, 1)
+					go func(connID string) {
+						defer atomic.AddInt64(&entry.ActiveConns, -1)
+
+						localConn, err := net.DialTimeout("tcp", localAddr, 10*time.Second)
+						if err != nil {
+							return
+						}
+						defer localConn.Close()
+
+						acceptStream, err := s.openStream()
+						if err != nil {
+							return
+						}
+						defer acceptStream.Close()
+
+						if err := protocol.WriteLineJSON(acceptStream, protocol.StreamHeader{
+							StreamType:      protocol.StreamTypeReverseAccept,
+							TargetMachineID: machineID,
+							ConnID:          connID,
+						}); err != nil {
+							return
+						}
+
+						var aAck protocol.StreamAck
+						if err := acceptStream.ReadLineJSON(&aAck); err != nil || !aAck.OK {
+							return
+						}
+
+						var wg sync.WaitGroup
+						wg.Add(2)
+						go func() {
+							defer wg.Done()
+							_, _ = io.Copy(acceptStream, localConn)
+							_ = acceptStream.Close()
+						}()
+						go func() {
+							defer wg.Done()
+							_, _ = io.Copy(localConn, acceptStream)
+							_ = localConn.Close()
+						}()
+						wg.Wait()
+					}(ev.ConnID)
+				}
+			}
+
+			// If the rule was explicitly removed, exit immediately
+			select {
+			case <-stopCh:
 				return
+			case <-time.After(time.Second):
 			}
-			if ev.ConnID == "" {
-				continue
+
+			// Re-establish reverse_listen on boundRemote (or fallback to remoteAddr)
+			nextStream, newBound, reErr := openReverseListen(boundRemote)
+			if reErr != nil && boundRemote != remoteAddr {
+				nextStream, newBound, reErr = openReverseListen(remoteAddr)
 			}
-			atomic.AddInt64(&entry.ActiveConns, 1)
-			go func(connID string) {
-				defer atomic.AddInt64(&entry.ActiveConns, -1)
-
-				localConn, err := net.DialTimeout("tcp", localAddr, 10*time.Second)
-				if err != nil {
-					return
-				}
-				defer localConn.Close()
-
-				acceptStream, err := s.openStream()
-				if err != nil {
-					return
-				}
-				defer acceptStream.Close()
-
-				if err := protocol.WriteLineJSON(acceptStream, protocol.StreamHeader{
-					StreamType:      protocol.StreamTypeReverseAccept,
-					TargetMachineID: machineID,
-					ConnID:          connID,
-				}); err != nil {
-					return
-				}
-
-				var aAck protocol.StreamAck
-				if err := acceptStream.ReadLineJSON(&aAck); err != nil || !aAck.OK {
-					return
-				}
-
-				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					_, _ = io.Copy(acceptStream, localConn)
-					_ = acceptStream.Close()
-				}()
-				go func() {
-					defer wg.Done()
-					_, _ = io.Copy(localConn, acceptStream)
-					_ = localConn.Close()
-				}()
-				wg.Wait()
-			}(ev.ConnID)
+			streamMu.Lock()
+			curCtrl = nextStream
+			if reErr == nil && newBound != "" {
+				boundRemote = newBound
+				entry.RemoteAddr = newBound
+			}
+			streamMu.Unlock()
 		}
 	}()
 

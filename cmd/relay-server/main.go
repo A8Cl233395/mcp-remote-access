@@ -29,6 +29,10 @@ func main() {
 		log.Fatalf("[relay-server] %v", err)
 	}
 
+	if *userKey == "default-user-key" || *devKey == "default-dev-key" {
+		log.Printf("[relay-server] WARNING: using default authentication key(s); pass -user-key and -dev-key in production!")
+	}
+
 	srv := relay.NewServer(relay.Config{
 		ListenAddr:  *addr,
 		UserKey:     *userKey,
