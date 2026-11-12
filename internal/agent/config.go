@@ -37,6 +37,17 @@ func HasConfigFile() bool {
 	return err == nil
 }
 
+// RemoveConfigFile deletes the configuration file and its parent mcp-remoteaccess folder if empty.
+func RemoveConfigFile() error {
+	p := ConfigFilePath()
+	_ = os.Remove(p)
+	dir := filepath.Dir(p)
+	if filepath.Base(dir) == "mcp-remoteaccess" {
+		_ = os.Remove(dir)
+	}
+	return nil
+}
+
 func LoadPersistentConfig() PersistentConfig {
 	var cfg PersistentConfig
 	data, err := os.ReadFile(ConfigFilePath())

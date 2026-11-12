@@ -170,7 +170,7 @@ func startOrRestartAgent(userKey string, saveFile bool) {
 		}
 		_ = SavePersistentConfig(pCfg)
 	} else {
-		_ = os.Remove(ConfigFilePath())
+		_ = RemoveConfigFile()
 	}
 
 	guiMu.Lock()

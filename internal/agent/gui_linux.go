@@ -166,7 +166,7 @@ func RunGUI(opts ClientOptions) error {
 			}
 			_ = SavePersistentConfig(pCfg)
 		} else {
-			_ = os.Remove(ConfigFilePath())
+			_ = RemoveConfigFile()
 		}
 
 		if sharedClient == nil {
