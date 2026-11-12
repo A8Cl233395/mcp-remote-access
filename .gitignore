@@ -1,0 +1,21 @@
+# Compiled binaries and release artifacts
+/bin/
+/releases/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.old
+*.new
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
