@@ -31,6 +31,12 @@ func ConfigFilePath() string {
 	return filepath.Join(dir, "mcp-remoteaccess", "user-client.json")
 }
 
+// HasConfigFile returns true if a persistent configuration file already exists on disk.
+func HasConfigFile() bool {
+	_, err := os.Stat(ConfigFilePath())
+	return err == nil
+}
+
 func LoadPersistentConfig() PersistentConfig {
 	var cfg PersistentConfig
 	data, err := os.ReadFile(ConfigFilePath())

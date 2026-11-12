@@ -193,7 +193,7 @@ func RunGUI(opts ClientOptions) error {
 	}
 
 	if strings.TrimSpace(curKey) != "" {
-		startAgent(curKey, false)
+		startAgent(curKey, HasConfigFile())
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -293,7 +293,11 @@ func RunGUI(opts ClientOptions) error {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(linuxGUIHTML))
+		html := linuxGUIHTML
+		if HasConfigFile() {
+			html = strings.Replace(html, `id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;"`, `id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;" checked`, 1)
+		}
+		_, _ = w.Write([]byte(html))
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		touchHeartbeat()
@@ -303,7 +307,7 @@ func RunGUI(opts ClientOptions) error {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"key":      curKey,
 			"status":   curStatus,
-			"saveFile": false,
+			"saveFile": HasConfigFile(),
 		})
 	})
 	mux.HandleFunc("/api/connect", func(w http.ResponseWriter, r *http.Request) {

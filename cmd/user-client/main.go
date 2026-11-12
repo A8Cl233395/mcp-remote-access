@@ -28,7 +28,7 @@ func main() {
 	workdir := flag.String("workdir", envOrDefault("MCP_WORKDIR", saved.Workdir), "Initial working directory")
 	noUpdate := flag.Bool("no-update", false, "Disable automatic binary self-update check")
 	insecure := flag.Bool("insecure", envOrDefault("MCP_INSECURE", "") == "1", "Skip SSL certificate verification and allow insecure connections")
-	saveFile := flag.Bool("save", false, "Save configuration to file")
+	saveFile := flag.Bool("save", agent.HasConfigFile(), "Save configuration to file (defaults to true if previous config exists)")
 	flag.Parse()
 
 	opts := agent.ClientOptions{

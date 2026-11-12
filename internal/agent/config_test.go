@@ -12,9 +12,15 @@ func TestPersistentConfigSaveFileOption(t *testing.T) {
 	defer func() { configPathOverride = "" }()
 
 	// 1. Initially empty: loading config must NOT create any file on disk
+	if HasConfigFile() {
+		t.Fatalf("expected HasConfigFile() to be false initially")
+	}
 	cfg := LoadPersistentConfig()
 	if cfg.UserKey != "" {
 		t.Fatalf("expected empty user_key initially, got %q", cfg.UserKey)
+	}
+	if HasConfigFile() {
+		t.Fatalf("expected HasConfigFile() to remain false after LoadPersistentConfig()")
 	}
 	if _, err := os.Stat(configPathOverride); !os.IsNotExist(err) {
 		t.Fatalf("expected config file NOT to exist after LoadPersistentConfig(), but it exists: %v", err)
@@ -25,6 +31,9 @@ func TestPersistentConfigSaveFileOption(t *testing.T) {
 	if err := SavePersistentConfig(cfg); err != nil {
 		t.Fatalf("failed to save config: %v", err)
 	}
+	if !HasConfigFile() {
+		t.Fatalf("expected HasConfigFile() to be true after SavePersistentConfig()")
+	}
 
 	loaded := LoadPersistentConfig()
 	if loaded.UserKey != "my-secret-key" {
@@ -34,6 +43,9 @@ func TestPersistentConfigSaveFileOption(t *testing.T) {
 	// 3. User chooses NOT to save file (cancels / unchecks): file is removed
 	if err := os.Remove(configPathOverride); err != nil {
 		t.Fatalf("failed to remove config file: %v", err)
+	}
+	if HasConfigFile() {
+		t.Fatalf("expected HasConfigFile() to be false after removing config file")
 	}
 
 	if _, err := os.Stat(configPathOverride); !os.IsNotExist(err) {

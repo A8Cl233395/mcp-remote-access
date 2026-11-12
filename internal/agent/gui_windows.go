@@ -238,6 +238,9 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 
 		hwndSaveFileChk = createCtrl("BUTTON", "Save File", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 115, 48, 120, 22, idCheckSaveFile)
 		initCheck := bstUnchecked
+		if HasConfigFile() {
+			initCheck = bstChecked
+		}
 		_, _, _ = procSendMessageW.Call(uintptr(hwndSaveFileChk), bmSetCheck, uintptr(initCheck), 0)
 
 		hwndBtnConnect = createCtrl("BUTTON", "Connect", wsChild|wsVisible|wsTabStop|bsPushButton, 115, 76, 120, 28, idBtnConnect)
