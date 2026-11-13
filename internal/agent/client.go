@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,6 +26,40 @@ import (
 
 	"mcp-remoteaccess/internal/protocol"
 )
+
+// FatalError represents a non-unexpected connection failure or explicit remote rejection
+// that should not trigger automatic reconnection.
+type FatalError struct {
+	Reason string
+	Err    error
+}
+
+func (e *FatalError) Error() string {
+	if e.Reason != "" && e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Reason, e.Err)
+	}
+	if e.Reason != "" {
+		return e.Reason
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "fatal connection error"
+}
+
+func (e *FatalError) Unwrap() error {
+	return e.Err
+}
+
+// IsFatalError reports whether err represents a non-unexpected disconnection or
+// explicit rejection that should stop the client rather than auto-reconnect.
+func IsFatalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fe *FatalError
+	return errors.As(err, &fe)
+}
 
 const ClientVersion = "1.0.0"
 
@@ -246,7 +284,9 @@ func (c *Client) pushStateUpdate() {
 	}()
 }
 
-// Run connects to relay-server and automatically reconnects until ctx is canceled.
+// Run connects to relay-server and automatically reconnects on unexpected disconnections until ctx is canceled.
+// Non-unexpected disconnections (such as connection refused, invalid key, kicked offline, or server rejection)
+// stop immediately and return a *FatalError without reconnecting.
 func (c *Client) Run(ctx context.Context) error {
 	CleanupOldBinary()
 	defer c.wakeLock.Release()
@@ -259,21 +299,34 @@ func (c *Client) Run(ctx context.Context) error {
 
 		if c.opts.AutoUpdate {
 			info := c.GetMachineInfo()
-			_ = SelfUpdateAndRestartWithState(RestartState{
+			if updErr := SelfUpdateAndRestartWithState(RestartState{
 				ServerAddr: c.opts.ServerAddr,
 				UserKey:    c.GetUserKey(),
 				MachineID:  info.MachineID,
 				Shell:      info.Shell,
 				Workdir:    info.Workdir,
 				Insecure:   c.opts.Insecure,
-			}, c.opts.OnStatus)
+			}, c.opts.OnStatus); updErr != nil {
+				if fatalErr := classifyUpdateError(updErr); fatalErr != nil {
+					c.setStatus(fmt.Sprintf("Error: %v", fatalErr))
+					return fatalErr
+				}
+			}
 		}
 
+		attemptStart := time.Now()
 		err := c.connectAndServe(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err != nil {
+			if IsFatalError(err) {
+				c.setStatus(fmt.Sprintf("Error: %v", err))
+				return err
+			}
+			if time.Since(attemptStart) > 15*time.Second {
+				backoff = time.Second
+			}
 			c.setStatus(fmt.Sprintf("Disconnected (%v), retrying in %v...", err, backoff))
 		}
 
@@ -291,7 +344,7 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) connectAndServe(ctx context.Context) error {
 	wsURL, err := NormalizeWSURLWithInsecure(c.opts.ServerAddr, "/ws/user", c.opts.Insecure)
 	if err != nil {
-		return err
+		return &FatalError{Reason: "invalid server address", Err: err}
 	}
 	c.setStatus(fmt.Sprintf("Connecting to %s...", wsURL))
 
@@ -306,16 +359,25 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	if err != nil && c.opts.Insecure && strings.HasPrefix(wsURL, "wss://") {
 		plainURL := "ws://" + strings.TrimPrefix(wsURL, "wss://")
 		if ws2, resp2, err2 := dialer.DialContext(ctx, plainURL, headers); err2 == nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 			ws = ws2
 			resp = resp2
 			err = nil
+		} else if resp2 != nil {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			resp = resp2
+			err = err2
 		}
 	}
 	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
-			return fmt.Errorf("authentication failed (invalid user key)")
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
 		}
-		return err
+		return classifyDialError(err, resp)
 	}
 
 	wsConn := protocol.NewWSConn(ws)
@@ -328,11 +390,18 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.mu.Lock()
 	c.session = session
 	c.mu.Unlock()
+	defer func() {
+		_ = session.Close()
+		c.mu.Lock()
+		if c.session == session {
+			c.session = nil
+		}
+		c.mu.Unlock()
+	}()
 
 	// Send initial registration stream
 	regStream, err := session.OpenStream()
 	if err != nil {
-		_ = session.Close()
 		return err
 	}
 	info := c.GetMachineInfo()
@@ -341,15 +410,20 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		Machine:    &info,
 	}); err != nil {
 		_ = regStream.Close()
-		_ = session.Close()
 		return err
 	}
 	bs := protocol.NewBufferedStream(regStream)
 	var ack protocol.StreamAck
-	if err := bs.ReadLineJSON(&ack); err != nil || !ack.OK {
+	if err := bs.ReadLineJSON(&ack); err != nil {
 		_ = regStream.Close()
-		_ = session.Close()
-		return fmt.Errorf("registration rejected: %s", ack.Error)
+		if fatalErr := classifyWSCloseError(wsConn.RemoteCloseError()); fatalErr != nil {
+			return fatalErr
+		}
+		return fmt.Errorf("registration handshake failed: %w", err)
+	}
+	if !ack.OK {
+		_ = regStream.Close()
+		return &FatalError{Reason: fmt.Sprintf("registration rejected: %s", ack.Error)}
 	}
 	_ = regStream.Close()
 
@@ -373,10 +447,129 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	for {
 		stream, err := session.AcceptStream()
 		if err != nil {
+			if fatalErr := classifyWSCloseError(wsConn.RemoteCloseError()); fatalErr != nil {
+				return fatalErr
+			}
 			return err
 		}
 		go c.handleStream(stream)
 	}
+}
+
+func classifyUpdateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isConnectionRefusedError(err) {
+		return &FatalError{Reason: "connection actively refused by remote server", Err: err}
+	}
+	if isTLSError(err) {
+		return &FatalError{Reason: "TLS verification failed", Err: err}
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "status 401") {
+		return &FatalError{Reason: "authentication failed (invalid user key)"}
+	}
+	if strings.Contains(msg, "status 403") {
+		return &FatalError{Reason: "connection forbidden by server (HTTP 403)"}
+	}
+	return nil
+}
+
+func classifyDialError(err error, resp *http.Response) error {
+	if resp != nil {
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return &FatalError{Reason: "authentication failed (invalid user key)"}
+		case http.StatusForbidden:
+			return &FatalError{Reason: "connection forbidden by server (HTTP 403)"}
+		default:
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				return &FatalError{Reason: fmt.Sprintf("connection rejected by server (HTTP %d)", resp.StatusCode), Err: err}
+			}
+		}
+	}
+	if isConnectionRefusedError(err) {
+		return &FatalError{Reason: "connection actively refused by remote server", Err: err}
+	}
+	if isTLSError(err) {
+		return &FatalError{Reason: "TLS verification failed", Err: err}
+	}
+	return err
+}
+
+func classifyWSCloseError(ce *websocket.CloseError) error {
+	if ce == nil {
+		return nil
+	}
+	reason := strings.TrimSpace(ce.Text)
+	switch ce.Code {
+	case protocol.CloseCodeKicked:
+		if reason == "" {
+			reason = "another client connected with the same machine ID"
+		}
+		return &FatalError{Reason: fmt.Sprintf("kicked offline: %s", reason)}
+	case protocol.CloseCodeUnauthorized:
+		if reason == "" {
+			reason = "authentication failed or revoked"
+		}
+		return &FatalError{Reason: reason}
+	case protocol.CloseCodeRejected:
+		if reason == "" {
+			reason = "connection rejected by server"
+		}
+		return &FatalError{Reason: reason}
+	case websocket.CloseNormalClosure:
+		if reason != "" {
+			return &FatalError{Reason: fmt.Sprintf("connection closed by server: %s", reason)}
+		}
+		return &FatalError{Reason: "connection closed by server"}
+	case websocket.ClosePolicyViolation:
+		if reason != "" {
+			return &FatalError{Reason: fmt.Sprintf("connection rejected by server policy: %s", reason)}
+		}
+		return &FatalError{Reason: "connection rejected by server policy"}
+	default:
+		if ce.Code >= 4000 && ce.Code <= 4999 {
+			if reason != "" {
+				return &FatalError{Reason: fmt.Sprintf("disconnected by server (code %d): %s", ce.Code, reason)}
+			}
+			return &FatalError{Reason: fmt.Sprintf("disconnected by server (code %d)", ce.Code)}
+		}
+		return nil
+	}
+}
+
+func isConnectionRefusedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(10061)) { // WSAECONNREFUSED
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused")
+}
+
+func isTLSError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var certInvalid x509.CertificateInvalidError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var sysRootsErr x509.SystemRootsError
+	var recHdrErr tls.RecordHeaderError
+	var certVerifyErr *tls.CertificateVerificationError
+	return errors.As(err, &certInvalid) ||
+		errors.As(err, &unknownAuth) ||
+		errors.As(err, &hostErr) ||
+		errors.As(err, &sysRootsErr) ||
+		errors.As(err, &recHdrErr) ||
+		errors.As(err, &certVerifyErr)
 }
 
 func (c *Client) handleStream(raw io.ReadWriteCloser) {

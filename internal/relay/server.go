@@ -34,8 +34,18 @@ type Config struct {
 type AgentSession struct {
 	Info        protocol.MachineInfo
 	Session     *yamux.Session
+	WSConn      *protocol.WSConn
 	ConnectedAt time.Time
 	mu          sync.RWMutex
+}
+
+func (a *AgentSession) Kick(code int, reason string) {
+	if a.WSConn != nil {
+		_ = a.WSConn.CloseWithCode(code, reason)
+	}
+	if a.Session != nil {
+		_ = a.Session.Close()
+	}
 }
 
 func (a *AgentSession) GetInfo() protocol.MachineInfo {
@@ -283,6 +293,7 @@ func (s *Server) handleWSUser(w http.ResponseWriter, r *http.Request) {
 	if err := bs.ReadLineJSON(&hdr); err != nil || hdr.StreamType != protocol.StreamTypeAgentRegister || hdr.Machine == nil {
 		_ = protocol.WriteLineJSON(bs, protocol.StreamAck{OK: false, Error: "expected agent_register header with machine info"})
 		_ = regStream.Close()
+		_ = wsConn.CloseWithCode(protocol.CloseCodeRejected, "expected agent_register header with machine info")
 		_ = session.Close()
 		return
 	}
@@ -297,15 +308,22 @@ func (s *Server) handleWSUser(w http.ResponseWriter, r *http.Request) {
 	agent := &AgentSession{
 		Info:        info,
 		Session:     session,
+		WSConn:      wsConn,
 		ConnectedAt: now,
 	}
 
+	var kicked *AgentSession
 	s.mu.Lock()
 	if old, exists := s.agents[info.MachineID]; exists {
-		_ = old.Session.Close()
+		kicked = old
 	}
 	s.agents[info.MachineID] = agent
 	s.mu.Unlock()
+
+	if kicked != nil {
+		s.cfg.Logger.Printf("kicking previous user-client session for id=%s (replaced by new connection)", info.MachineID)
+		go kicked.Kick(protocol.CloseCodeKicked, "another client connected with the same machine ID")
+	}
 
 	_ = protocol.WriteLineJSON(bs, protocol.StreamAck{OK: true})
 	_ = regStream.Close()

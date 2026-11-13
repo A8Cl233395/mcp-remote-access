@@ -32,6 +32,15 @@ const linuxGUIHTML = `<!DOCTYPE html>
   .btn-exit { background: #dc2626; }
   .btn-exit:hover { background: #b91c1c; }
   .status { margin-top: 16px; padding: 10px; background: #f3f4f6; border-radius: 4px; font-size: 13px; word-break: break-all; }
+  .status.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+  .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
+  .modal-backdrop.open { display: flex; }
+  .modal { max-width: 380px; width: 100%; background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); border-top: 4px solid #dc2626; }
+  .modal-title { font-size: 16px; font-weight: 700; color: #991b1b; margin: 0 0 10px 0; }
+  .modal-msg { font-size: 13px; color: #1f2937; line-height: 1.5; word-break: break-word; white-space: pre-wrap; margin-bottom: 16px; }
+  .modal-actions { display: flex; justify-content: flex-end; }
+  .modal-actions button { background: #dc2626; }
+  .modal-actions button:hover { background: #b91c1c; }
 </style>
 </head>
 <body>
@@ -51,9 +60,28 @@ const linuxGUIHTML = `<!DOCTYPE html>
   </div>
   <div class="status" id="status">Status: Loading...</div>
 </div>
+<div id="errorModal" class="modal-backdrop">
+  <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="errorModalTitle">
+    <div class="modal-title" id="errorModalTitle">Connection Error</div>
+    <div class="modal-msg" id="errorModalMsg"></div>
+    <div class="modal-actions">
+      <button onclick="closeErrorModal()">OK</button>
+    </div>
+  </div>
+</div>
 <script>
 let userChangedSaveFile = false;
 let isExiting = false;
+let lastShownErrorSeq = 0;
+
+function showErrorModal(msg) {
+  document.getElementById('errorModalMsg').innerText = msg;
+  document.getElementById('errorModal').classList.add('open');
+}
+
+function closeErrorModal() {
+  document.getElementById('errorModal').classList.remove('open');
+}
 
 document.getElementById('saveFile').addEventListener('change', function() {
   userChangedSaveFile = true;
@@ -70,7 +98,17 @@ async function loadState() {
     if (!userChangedSaveFile && typeof d.saveFile === 'boolean') {
       document.getElementById('saveFile').checked = d.saveFile;
     }
-    document.getElementById('status').innerText = 'Status: ' + d.status;
+    const statusEl = document.getElementById('status');
+    statusEl.innerText = 'Status: ' + d.status;
+    if (d.error) {
+      statusEl.classList.add('error');
+    } else {
+      statusEl.classList.remove('error');
+    }
+    if (d.error && d.errorSeq && d.errorSeq > lastShownErrorSeq) {
+      lastShownErrorSeq = d.errorSeq;
+      showErrorModal(d.error);
+    }
   } catch(e) {
     if (!isExiting) {
       document.getElementById('status').innerText = 'Status: Client stopped or disconnected';
@@ -87,6 +125,7 @@ async function sendHeartbeat() {
 
 async function connectNow() {
   if (isExiting) return;
+  closeErrorModal();
   const key = document.getElementById('key').value;
   const saveFile = document.getElementById('saveFile').checked;
   await fetch('/api/connect', {
@@ -140,6 +179,9 @@ func RunGUI(opts ClientOptions) error {
 	var mu sync.Mutex
 	curKey := opts.UserKey
 	curStatus := "Idle - Enter Connection Key and click Connect."
+	curError := ""
+	var curErrorSeq uint64
+	var runSeq uint64
 	var cancelFn context.CancelFunc
 	var sharedClient *Client
 
@@ -149,6 +191,9 @@ func RunGUI(opts ClientOptions) error {
 			cancelFn()
 			cancelFn = nil
 		}
+		runSeq++
+		mySeq := runSeq
+		curError = ""
 		curKey = strings.TrimSpace(key)
 		if curKey == "" {
 			curStatus = "Please provide Connection Key."
@@ -187,9 +232,18 @@ func RunGUI(opts ClientOptions) error {
 		client := sharedClient
 		mu.Unlock()
 
-		go func() {
-			_ = client.Run(ctx)
-		}()
+		go func(seq uint64, runCtx context.Context) {
+			err := client.Run(runCtx)
+			if err != nil && runCtx.Err() == nil {
+				mu.Lock()
+				if seq == runSeq {
+					curStatus = "Error: " + err.Error()
+					curError = err.Error()
+					curErrorSeq++
+				}
+				mu.Unlock()
+			}
+		}(mySeq, ctx)
 	}
 
 	if strings.TrimSpace(curKey) != "" {
@@ -303,6 +357,8 @@ func RunGUI(opts ClientOptions) error {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"key":      curKey,
 			"status":   curStatus,
+			"error":    curError,
+			"errorSeq": curErrorSeq,
 			"saveFile": HasConfigFile(),
 		})
 	})

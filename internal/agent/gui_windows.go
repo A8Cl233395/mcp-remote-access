@@ -28,6 +28,8 @@ var (
 	procGetWindowTextW   = user32.NewProc("GetWindowTextW")
 	procGetWindowTextLen = user32.NewProc("GetWindowTextLengthW")
 	procSendMessageW     = user32.NewProc("SendMessageW")
+	procPostMessageW     = user32.NewProc("PostMessageW")
+	procMessageBoxW      = user32.NewProc("MessageBoxW")
 	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
 	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
 	procAttachConsole    = kernel32.NewProc("AttachConsole")
@@ -73,11 +75,16 @@ const (
 	bstUnchecked       = 0
 	bstChecked         = 1
 
-	wmCreate  = 0x0001
-	wmDestroy = 0x0002
-	wmCommand = 0x0111
-	wmSetFont = 0x0030
-	wmAppStat = 0x8001
+	wmCreate   = 0x0001
+	wmDestroy  = 0x0002
+	wmCommand  = 0x0111
+	wmSetFont  = 0x0030
+	wmAppStat  = 0x8001
+	wmAppError = 0x8002
+
+	mbOK            = 0x00000000
+	mbIconError     = 0x00000010
+	mbSetForeground = 0x00010000
 
 	swShow          = 5
 	colorBtnFace    = 15
@@ -122,11 +129,13 @@ var (
 	hwndKeyEdit     syscall.Handle
 	hwndSaveFileChk syscall.Handle
 	hwndBtnConnect  syscall.Handle
-	hwndStatus     syscall.Handle
-	latestStatus   string
-	guiCancel      context.CancelFunc
-	guiClient      *Client
-	guiBaseOpts    ClientOptions
+	hwndStatus      syscall.Handle
+	latestStatus    string
+	latestError     string
+	guiRunSeq       uint64
+	guiCancel       context.CancelFunc
+	guiClient       *Client
+	guiBaseOpts     ClientOptions
 )
 
 func setWindowText(hwnd syscall.Handle, text string) {
@@ -176,6 +185,9 @@ func startOrRestartAgent(userKey string, saveFile bool) {
 		guiCancel()
 		guiCancel = nil
 	}
+	guiRunSeq++
+	mySeq := guiRunSeq
+	latestError = ""
 	ctx, cancel := context.WithCancel(context.Background())
 	guiCancel = cancel
 
@@ -195,9 +207,12 @@ func startOrRestartAgent(userKey string, saveFile bool) {
 	client := guiClient
 	guiMu.Unlock()
 
-	go func() {
-		_ = client.Run(ctx)
-	}()
+	go func(seq uint64, runCtx context.Context) {
+		err := client.Run(runCtx)
+		if err != nil && runCtx.Err() == nil {
+			showGUIError(seq, err.Error())
+		}
+	}(mySeq, ctx)
 }
 
 func updateGUIStatus(st string) {
@@ -207,6 +222,22 @@ func updateGUIStatus(st string) {
 	guiMu.Unlock()
 	if h != 0 {
 		_, _, _ = procSendMessageW.Call(uintptr(h), wmAppStat, 0, 0)
+	}
+}
+
+func showGUIError(seq uint64, errMsg string) {
+	guiMu.Lock()
+	if seq != guiRunSeq {
+		guiMu.Unlock()
+		return
+	}
+	latestStatus = "Status: Error: " + errMsg
+	latestError = errMsg
+	h := hwndMain
+	guiMu.Unlock()
+	if h != 0 {
+		_, _, _ = procPostMessageW.Call(uintptr(h), wmAppStat, 0, 0)
+		_, _, _ = procPostMessageW.Call(uintptr(h), wmAppError, 0, 0)
 	}
 }
 
@@ -262,8 +293,27 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		setWindowText(hwndStatus, st)
 		return 0
 
+	case wmAppError:
+		guiMu.Lock()
+		errText := latestError
+		latestError = ""
+		guiMu.Unlock()
+		if errText != "" {
+			titlePtr, _ := syscall.UTF16PtrFromString("MCP Remote Access - Connection Error")
+			msgPtr, _ := syscall.UTF16PtrFromString(errText)
+			_, _, _ = procMessageBoxW.Call(
+				uintptr(hwnd),
+				uintptr(unsafe.Pointer(msgPtr)),
+				uintptr(unsafe.Pointer(titlePtr)),
+				mbOK|mbIconError|mbSetForeground,
+			)
+		}
+		return 0
+
 	case wmDestroy:
 		guiMu.Lock()
+		guiRunSeq++
+		latestError = ""
 		if guiCancel != nil {
 			guiCancel()
 			guiCancel = nil
