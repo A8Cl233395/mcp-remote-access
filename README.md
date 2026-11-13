@@ -22,7 +22,9 @@
 
 项目全程使用纯 Go（`CGO_ENABLED=0`）构建，无任何外部动态库依赖，支持在单机上一键交叉编译 Windows（含 Windows 7 32 位）与 Linux（`amd64` / `arm64`）单文件可执行程序。
 
-### 1. 使用 `build.ps1` 一键编译
+### 1. 使用 `build.ps1` / `build.sh` 一键编译
+
+Windows PowerShell 可使用 `.\build.ps1`，Linux / macOS / Git Bash 可使用 `./build.sh`：
 
 - **自动从 `.env` 读取公网服务器地址（推荐）**：
   复制 `.env.example` 为 `.env`，填入你的中继服务器地址：
@@ -31,17 +33,23 @@
   ```
   然后直接执行脚本，脚本会自动读取并注入（支持 `DEFAULT_SERVER`、`DEFAULT_SERVER_ADDR` 或 `MCP_SERVER_ADDR`）：
   ```powershell
+  # Windows PowerShell
   .\build.ps1
+
+  # Linux / macOS / Git Bash
+  ./build.sh
   ```
 - **命令行传参注入自定义服务器地址**：
   ```powershell
   .\build.ps1 -DefaultServer "example.com:20055"
+  # 或在 Bash 中：
+  ./build.sh --default-server "example.com:20055"
   ```
 - **使用本地缺省地址（`127.0.0.1:20055`）**：
   若未配置 `.env` 且未传参，默认使用本地回环地址。
   > 若省略端口（如 `-DefaultServer "example.com"`），客户端运行时也会自动补齐默认端口 `:20055`。
 - **Windows 7 32 位（`windows/386`）工具链**：
-  首次运行 `build.ps1` 时，会自动下载并校验 [`XTLS/go-win7`](https://github.com/XTLS/go-win7)（`patched-1.27.4`）至 `.toolchain/go-win7`，专门用于编译原生兼容 Windows 7 32 位的 `user-client-windows-386.exe`。
+  首次运行 `build.ps1` 或 `build.sh` 时，会自动下载并校验 [`XTLS/go-win7`](https://github.com/XTLS/go-win7)（`patched-1.27.4`）至 `.toolchain/go-win7`，专门用于编译原生兼容 Windows 7 32 位的 `user-client-windows-386.exe`。
 
 ### 2. 手动 `go build` 与 `-ldflags` 编译选项详解
 
