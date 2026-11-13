@@ -228,7 +228,57 @@ func CheckAndDownloadUpdateWithInsecure(serverAddr, userKey, targetExePath, goos
 	return true, nil
 }
 
+const handoffStateEnv = "MCP_HANDOFF_STATE"
+
+// RestartState holds in-memory session state passed across a self-update restart
+// without persisting credentials to disk when "Save Login State" is disabled.
+type RestartState struct {
+	ServerAddr string `json:"server_addr,omitempty"`
+	UserKey    string `json:"user_key,omitempty"`
+	MachineID  string `json:"machine_id,omitempty"`
+	Shell      string `json:"shell,omitempty"`
+	Workdir    string `json:"workdir,omitempty"`
+	Insecure   bool   `json:"insecure,omitempty"`
+}
+
+// ConsumeRestartState reads and immediately clears the one-shot restart handoff
+// environment variable so child shell processes do not inherit credentials.
+func ConsumeRestartState() *RestartState {
+	raw := strings.TrimSpace(os.Getenv(handoffStateEnv))
+	_ = os.Unsetenv(handoffStateEnv)
+	if raw == "" {
+		return nil
+	}
+	var st RestartState
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		return nil
+	}
+	return &st
+}
+
+func buildHandoffEnv(base []string, state RestartState) []string {
+	prefix := handoffStateEnv + "="
+	env := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if !strings.HasPrefix(entry, prefix) {
+			env = append(env, entry)
+		}
+	}
+	if b, err := json.Marshal(state); err == nil {
+		env = append(env, prefix+string(b))
+	}
+	return env
+}
+
 func SelfUpdateAndRestart(serverAddr, userKey string, insecure bool, onStatus func(string)) error {
+	return SelfUpdateAndRestartWithState(RestartState{
+		ServerAddr: serverAddr,
+		UserKey:    userKey,
+		Insecure:   insecure,
+	}, onStatus)
+}
+
+func SelfUpdateAndRestartWithState(state RestartState, onStatus func(string)) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -236,7 +286,7 @@ func SelfUpdateAndRestart(serverAddr, userKey string, insecure bool, onStatus fu
 	if onStatus != nil {
 		onStatus("Checking for updates...")
 	}
-	updated, err := CheckAndDownloadUpdateWithInsecure(serverAddr, userKey, exe, runtime.GOOS, runtime.GOARCH, insecure)
+	updated, err := CheckAndDownloadUpdateWithInsecure(state.ServerAddr, state.UserKey, exe, runtime.GOOS, runtime.GOARCH, state.Insecure)
 	if err != nil {
 		return err
 	}
@@ -250,7 +300,7 @@ func SelfUpdateAndRestart(serverAddr, userKey string, insecure bool, onStatus fu
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	cmd.Env = os.Environ()
+	cmd.Env = buildHandoffEnv(os.Environ(), state)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

@@ -18,16 +18,44 @@ func main() {
 		flag.CommandLine.SetOutput(os.Stderr)
 	}
 	saved := agent.LoadPersistentConfig()
+	handoff := agent.ConsumeRestartState()
+
+	defaultServer := envOrDefault("MCP_SERVER_ADDR", protocol.DefaultServerAddr)
+	defaultKey := envOrDefault("MCP_USER_KEY", saved.UserKey)
+	defaultID := envOrDefault("MCP_MACHINE_ID", saved.MachineID)
+	defaultShell := envOrDefault("MCP_SHELL", saved.Shell)
+	defaultWorkdir := envOrDefault("MCP_WORKDIR", saved.Workdir)
+	defaultInsecure := envOrDefault("MCP_INSECURE", "") == "1"
+	if handoff != nil {
+		if handoff.ServerAddr != "" {
+			defaultServer = handoff.ServerAddr
+		}
+		if handoff.UserKey != "" {
+			defaultKey = handoff.UserKey
+		}
+		if handoff.MachineID != "" {
+			defaultID = handoff.MachineID
+		}
+		if handoff.Shell != "" {
+			defaultShell = handoff.Shell
+		}
+		if handoff.Workdir != "" {
+			defaultWorkdir = handoff.Workdir
+		}
+		if handoff.Insecure {
+			defaultInsecure = true
+		}
+	}
 
 	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of GUI mode")
 	guiMode := flag.Bool("gui", false, "Force GUI mode")
-	serverAddr := flag.String("server", envOrDefault("MCP_SERVER_ADDR", protocol.DefaultServerAddr), "Relay server address (CLI override; defaults to built-in DefaultServerAddr)")
-	userKey := flag.String("key", envOrDefault("MCP_USER_KEY", saved.UserKey), "Connection key for user-client")
-	machineID := flag.String("id", envOrDefault("MCP_MACHINE_ID", saved.MachineID), "Custom machine ID")
-	shellSpec := flag.String("shell", envOrDefault("MCP_SHELL", saved.Shell), "Preferred shell (pwsh, powershell, cmd, bash, sh, ash)")
-	workdir := flag.String("workdir", envOrDefault("MCP_WORKDIR", saved.Workdir), "Initial working directory")
+	serverAddr := flag.String("server", defaultServer, "Relay server address (CLI override; defaults to built-in DefaultServerAddr)")
+	userKey := flag.String("key", defaultKey, "Connection key for user-client")
+	machineID := flag.String("id", defaultID, "Custom machine ID")
+	shellSpec := flag.String("shell", defaultShell, "Preferred shell (pwsh, powershell, cmd, bash, sh, ash)")
+	workdir := flag.String("workdir", defaultWorkdir, "Initial working directory")
 	noUpdate := flag.Bool("no-update", false, "Disable automatic binary self-update check")
-	insecure := flag.Bool("insecure", envOrDefault("MCP_INSECURE", "") == "1", "Skip SSL certificate verification and allow insecure connections")
+	insecure := flag.Bool("insecure", defaultInsecure, "Skip SSL certificate verification and allow insecure connections")
 	saveFile := flag.Bool("save", agent.HasConfigFile(), "Save configuration to file (defaults to true if previous config exists)")
 	flag.Parse()
 

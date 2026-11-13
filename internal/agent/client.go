@@ -258,7 +258,15 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		if c.opts.AutoUpdate {
-			_ = SelfUpdateAndRestart(c.opts.ServerAddr, c.GetUserKey(), c.opts.Insecure, c.opts.OnStatus)
+			info := c.GetMachineInfo()
+			_ = SelfUpdateAndRestartWithState(RestartState{
+				ServerAddr: c.opts.ServerAddr,
+				UserKey:    c.GetUserKey(),
+				MachineID:  info.MachineID,
+				Shell:      info.Shell,
+				Workdir:    info.Workdir,
+				Insecure:   c.opts.Insecure,
+			}, c.opts.OnStatus)
 		}
 
 		err := c.connectAndServe(ctx)

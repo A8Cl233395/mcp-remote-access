@@ -315,7 +315,7 @@ func RunGUI(opts ClientOptions) error {
 	_, _, _ = procUpdateWindow.Call(h)
 
 	if strings.TrimSpace(opts.UserKey) != "" {
-		startOrRestartAgent(opts.UserKey, true)
+		startOrRestartAgent(opts.UserKey, HasConfigFile())
 	} else {
 		updateGUIStatus("Status: Enter Connection Key and click Connect.")
 	}
