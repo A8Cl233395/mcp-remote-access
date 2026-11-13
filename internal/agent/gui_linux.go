@@ -42,7 +42,7 @@ const linuxGUIHTML = `<!DOCTYPE html>
   <div style="margin-bottom: 14px;">
     <label style="display: inline-flex; align-items: center; font-size: 13px; font-weight: normal; cursor: pointer; user-select: none;">
       <input id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;" />
-      Save File
+      Save Login State
     </label>
   </div>
   <div style="display: flex; gap: 10px;">

@@ -145,7 +145,7 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
 ### 2. 在目标机器运行用户客户端 (`user-client`)
 
 - **GUI 模式（默认，适合直接发给不懂技术的用户双击运行）**：
-  直接双击 `user-client.exe`（Windows 下无黑框），在窗口填入连接密钥，点击 **Connect**。若勾选 **Save File**，配置将保存在本地用户目录（`%APPDATA%\mcp-remoteaccess\user-client.json` 或 `~/.config/mcp-remoteaccess/user-client.json`）以便后续自动读取；默认取消勾选，取消勾选状态下不会在磁盘保存任何文件。
+  直接双击 `user-client.exe`（Windows 下无黑框），在窗口填入连接密钥，点击 **Connect**。若勾选 **Save Login State**，配置将保存在本地用户目录（`%APPDATA%\mcp-remoteaccess\user-client.json` 或 `~/.config/mcp-remoteaccess/user-client.json`）以便后续自动读取；默认取消勾选，取消勾选状态下不会在磁盘保存任何文件。
 - **CLI 模式（高度自定义）**：
   ```bash
   ./user-client -cli -server "example.com:20055" -key "my-user-secret" -shell pwsh -id "office-pc" -workdir "C:\Projects"

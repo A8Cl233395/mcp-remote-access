@@ -236,7 +236,7 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		createCtrl("STATIC", "Connection Key:", wsChild|wsVisible, 16, 20, 95, 22, 0)
 		hwndKeyEdit = createCtrl("EDIT", guiBaseOpts.UserKey, wsChild|wsVisible|wsBorder|wsTabStop|esAutoHScroll, 115, 18, 285, 24, idEditKey)
 
-		hwndSaveFileChk = createCtrl("BUTTON", "Save File", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 115, 48, 120, 22, idCheckSaveFile)
+		hwndSaveFileChk = createCtrl("BUTTON", "Save Login State", wsChild|wsVisible|wsTabStop|bsAutoCheckbox, 115, 48, 200, 22, idCheckSaveFile)
 		initCheck := bstUnchecked
 		if HasConfigFile() {
 			initCheck = bstChecked
