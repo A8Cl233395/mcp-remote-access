@@ -50,6 +50,10 @@ Windows PowerShell 可使用 `.\build.ps1`，Linux / macOS / Git Bash 可使用 
   > 若省略端口（如 `-DefaultServer "example.com"`），客户端运行时也会自动补齐默认端口 `:20055`。
 - **Windows 7 32 位（`windows/386`）工具链**：
   首次运行 `build.ps1` 或 `build.sh` 时，会自动下载并校验 [`XTLS/go-win7`](https://github.com/XTLS/go-win7)（`patched-1.27.4`）至 `.toolchain/go-win7`，专门用于编译原生兼容 Windows 7 32 位的 `user-client-windows-386.exe`。
+- **本地构建后钩子（Post-build Hook）**：
+  构建完成后，脚本会自动检测并执行项目根目录下的本地钩子 `post-build.ps1`（`build.ps1`）或 `post-build.sh`（`build.sh`），亦可通过 `POST_BUILD_HOOK` 环境变量指定自定义脚本路径（`post-build.*` 已被 `.gitignore` 忽略，不会提交到仓库）。
+  - 执行钩子时会自动注入 `MCP_ROOT_DIR`、`MCP_BIN_DIR`、`MCP_RELEASES_DIR` 环境变量，便于自动同步服务端二进制及 `releases/` 到远端主机。
+  - 如需跳过钩子，可传入 `-SkipHook`（PowerShell）/ `--skip-hook`（Bash），或设置 `SKIP_POST_BUILD_HOOK=1`。
 
 ### 2. 手动 `go build` 与 `-ldflags` 编译选项详解
 
@@ -114,7 +118,7 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
 | `-id <string>` | `MCP_MACHINE_ID` | `<hostname>-<随机后缀>`（启用保存时持久化） | 自定义当前目标机的 `machine_id` 标识 |
 | `-shell <string>` | `MCP_SHELL` | 自动按 Fallback 链探测 | 手动指定默认 Shell（如 `pwsh`, `powershell`, `cmd`, `bash`, `sh`, `ash` 或绝对路径）。未指定时 Windows 按 `pwsh -> powershell -> cmd`、Linux 按 `bash -> sh -> ash` 自动探测 |
 | `-workdir <path>` | `MCP_WORKDIR` | 当前启动目录 | 初始默认工作目录 |
-| `-save` | — | 本地已有配置时为 `true`，否则 `false` | CLI 模式下是否将配置写入本地配置文件（`user-client.json`） |
+| `-save` | — | 本地已有配置时为 `true`，否则 `false` | CLI 模式下是否将 `user_key` 与 `machine_id` 写入本地配置文件（`user-client.json`） |
 | `-no-update` | — | `false` | 禁用启动与重连时的自动更新检查 |
 | `-insecure` | `MCP_INSECURE=1` | `false` | 强制跳过 SSL 证书链校验并允许非加密连接（仅 CLI 可配，GUI 不暴露此选项；自更新重启时通过 `MCP_HANDOFF_STATE` 临时传递并在子进程启动前销毁） |
 
@@ -162,13 +166,13 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
   - **Streamable HTTP**：`https://example.com:20055/mcp`
   - **Legacy HTTP+SSE**：`https://example.com:20055/sse`（消息投递至 `/messages`）
   - **鉴权方式**：支持 `X-Dev-Key: <dev-key>`、`Authorization: Bearer <dev-key>`、`?key=<dev-key>`，或使用内置 OAuth 2.0 端点（`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/authorize`、`/oauth/token`，`client_secret` 校验 `-dev-key`）。
-  - **工具范围差异**：服务端 MCP 模式仅暴露 12 个纯远程控制工具；涉及本地磁盘与本地端口的 `upload`、`download`、`forwarding` 需通过本地 `dev-client` 使用。
+  - **工具范围差异**：服务端 MCP 模式仅暴露 12 个纯远程控制工具；涉及本地磁盘与本地端口的 `upload`、`download`、`forwarding` 需通过本地 `dev-client` 使用。与 `dev-client` 一致，所有远程工具均作用于当前会话通过 `switch_machine` 选中的目标机。
 
 ### 2. 在目标机器运行用户客户端 (`user-client`)
 
 - **GUI 模式（默认，适合直接发给不懂技术的用户双击运行）**：
-  直接双击 `user-client.exe`（Windows 下无黑框），在窗口填入连接密钥，点击 **Connect**。
-  - 若勾选 **Save Login State**，配置将保存在本地用户目录（`%APPDATA%\mcp-remoteaccess\user-client.json` 或 `~/.config/mcp-remoteaccess/user-client.json`），且下次打开会自动勾选；取消勾选时会自动删除配置文件并清理空配置目录，不留磁盘痕迹。
+  直接双击 `user-client.exe`（Windows 下无黑框，支持 `Tab` 切换控件与回车触发连接），在窗口填入连接密钥，点击 **Connect**。
+  - 若勾选 **Save Login State**，仅将 `user_key` 与 `machine_id` 保存在本地用户目录（`%APPDATA%\mcp-remoteaccess\user-client.json` 或 `~/.config/mcp-remoteaccess/user-client.json`），不保存服务器地址、Shell 或工作目录，且下次打开会自动勾选；取消勾选时会自动删除配置文件并清理空配置目录，不留磁盘痕迹。
   - **自动重连与错误弹窗语义**：仅网络波动、超时、DNS 暂时失败或服务端 `5xx` / `1006` / `1001` 等异常断线会自动重连；遇到连接拒绝（`ECONNREFUSED`）、HTTP `4xx` / 密钥错误、TLS 校验失败或同 `machine_id` 被新会话顶下线（`4001`）等非预期错误时，会立即停止重连并弹出错误提示框。
   - 自更新重启期间会通过临时环境变量 `MCP_HANDOFF_STATE` 交接当前密钥与运行时选项，启动后立即销毁，不会写入磁盘，也不会泄露给 `shell` 子进程。
 - **CLI 模式（高度自定义）**：
