@@ -293,11 +293,7 @@ func RunGUI(opts ClientOptions) error {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		html := linuxGUIHTML
-		if HasConfigFile() {
-			html = strings.Replace(html, `id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;"`, `id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;" checked`, 1)
-		}
-		_, _ = w.Write([]byte(html))
+		_, _ = w.Write([]byte(linuxGUIHTML))
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		touchHeartbeat()
@@ -314,17 +310,10 @@ func RunGUI(opts ClientOptions) error {
 		touchHeartbeat()
 		var body struct {
 			Key      string `json:"key"`
-			SaveFile *bool  `json:"saveFile"`
-			SaveKey  *bool  `json:"saveKey"`
+			SaveFile bool   `json:"saveFile"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		saveFile := false
-		if body.SaveFile != nil {
-			saveFile = *body.SaveFile
-		} else if body.SaveKey != nil {
-			saveFile = *body.SaveKey
-		}
-		startAgent(body.Key, saveFile)
+		startAgent(body.Key, body.SaveFile)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})

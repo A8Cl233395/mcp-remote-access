@@ -3,7 +3,6 @@ package dev
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -591,13 +590,13 @@ func (s *Session) addForward(proto, direction, localAddr, remoteAddr string) (st
 		if direction == "remote_to_local" {
 			return s.addRemoteToLocalUDP(targetMachine, localAddr, remoteAddr)
 		}
-		return s.addLocalToRemoteUDP(targetMachine, localAddr, remoteAddr)
+		return s.addLocalToRemote(targetMachine, "udp", localAddr, remoteAddr)
 	}
 
 	if direction == "remote_to_local" {
 		return s.addRemoteToLocal(targetMachine, localAddr, remoteAddr)
 	}
-	return s.addLocalToRemote(targetMachine, localAddr, remoteAddr)
+	return s.addLocalToRemote(targetMachine, "tcp", localAddr, remoteAddr)
 }
 
 func (s *Session) addRemoteToLocal(machineID, localAddr, remoteAddr string) (string, map[string]any, error) {
@@ -655,19 +654,7 @@ func (s *Session) addRemoteToLocal(machineID, localAddr, remoteAddr string) (str
 					return
 				}
 
-				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					_, _ = io.Copy(bs, c)
-					_ = bs.Close()
-				}()
-				go func() {
-					defer wg.Done()
-					_, _ = io.Copy(c, bs)
-					_ = c.Close()
-				}()
-				wg.Wait()
+				protocol.RelayBidirectional(bs, c)
 			}(localConn)
 		}
 	}()
@@ -681,14 +668,21 @@ func (s *Session) addRemoteToLocal(machineID, localAddr, remoteAddr string) (str
 	}, nil
 }
 
-func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (string, map[string]any, error) {
+func (s *Session) addLocalToRemote(machineID, proto, localAddr, remoteAddr string) (string, map[string]any, error) {
+	listenType := protocol.StreamTypeReverseListen
+	acceptType := protocol.StreamTypeReverseAccept
+	if proto == "udp" {
+		listenType = protocol.StreamTypeUDPReverseListen
+		acceptType = protocol.StreamTypeUDPReverseAccept
+	}
+
 	openReverseListen := func(addr string) (*protocol.BufferedStream, string, error) {
 		cs, err := s.openStream()
 		if err != nil {
 			return nil, "", err
 		}
 		if err := protocol.WriteLineJSON(cs, protocol.StreamHeader{
-			StreamType:      protocol.StreamTypeReverseListen,
+			StreamType:      listenType,
 			TargetMachineID: machineID,
 			RemoteAddr:      addr,
 		}); err != nil {
@@ -698,7 +692,7 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 		var ack protocol.StreamAck
 		if err := cs.ReadLineJSON(&ack); err != nil {
 			_ = cs.Close()
-			return nil, "", fmt.Errorf("reverse_listen handshake failed: %w", err)
+			return nil, "", fmt.Errorf("%s reverse_listen handshake failed: %w", proto, err)
 		}
 		if !ack.OK {
 			_ = cs.Close()
@@ -724,7 +718,7 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 
 	entry := &ForwardEntry{
 		ID:         id,
-		Protocol:   "tcp",
+		Protocol:   proto,
 		Direction:  "local_to_remote",
 		MachineID:  machineID,
 		LocalAddr:  localAddr,
@@ -779,8 +773,14 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 					go func(connID string) {
 						defer atomic.AddInt64(&entry.ActiveConns, -1)
 
-						localConn, err := net.DialTimeout("tcp", localAddr, 10*time.Second)
-						if err != nil {
+						var localConn net.Conn
+						var dialErr error
+						if proto == "udp" {
+							localConn, dialErr = net.Dial("udp", localAddr)
+						} else {
+							localConn, dialErr = net.DialTimeout("tcp", localAddr, 10*time.Second)
+						}
+						if dialErr != nil {
 							return
 						}
 						defer localConn.Close()
@@ -792,7 +792,7 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 						defer acceptStream.Close()
 
 						if err := protocol.WriteLineJSON(acceptStream, protocol.StreamHeader{
-							StreamType:      protocol.StreamTypeReverseAccept,
+							StreamType:      acceptType,
 							TargetMachineID: machineID,
 							ConnID:          connID,
 						}); err != nil {
@@ -804,19 +804,11 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 							return
 						}
 
-						var wg sync.WaitGroup
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
-							_, _ = io.Copy(acceptStream, localConn)
-							_ = acceptStream.Close()
-						}()
-						go func() {
-							defer wg.Done()
-							_, _ = io.Copy(localConn, acceptStream)
-							_ = localConn.Close()
-						}()
-						wg.Wait()
+						if proto == "udp" {
+							protocol.RelayPacketConn(acceptStream, localConn)
+						} else {
+							protocol.RelayBidirectional(acceptStream, localConn)
+						}
 					}(ev.ConnID)
 				}
 			}
@@ -843,13 +835,19 @@ func (s *Session) addLocalToRemote(machineID, localAddr, remoteAddr string) (str
 		}
 	}()
 
-	return fmt.Sprintf("Added local_to_remote forwarding #%s: remote %s -> local %s (machine %s)", id, boundRemote, localAddr, machineID), map[string]any{
+	msg := fmt.Sprintf("Added local_to_remote forwarding #%s: remote %s -> local %s (machine %s)", id, boundRemote, localAddr, machineID)
+	meta := map[string]any{
 		"id":          id,
 		"direction":   "local_to_remote",
 		"local_addr":  localAddr,
 		"remote_addr": boundRemote,
 		"machine_id":  machineID,
-	}, nil
+	}
+	if proto == "udp" {
+		msg = fmt.Sprintf("Added local_to_remote forwarding #%s: remote %s -> local %s (machine %s, proto udp)", id, boundRemote, localAddr, machineID)
+		meta["protocol"] = "udp"
+	}
+	return msg, meta, nil
 }
 
 type devUDPSession struct {
@@ -1033,196 +1031,6 @@ func (s *Session) addRemoteToLocalUDP(machineID, localAddr, remoteAddr string) (
 		"direction":   "remote_to_local",
 		"local_addr":  boundLocal,
 		"remote_addr": remoteAddr,
-		"machine_id":  machineID,
-	}, nil
-}
-
-func (s *Session) addLocalToRemoteUDP(machineID, localAddr, remoteAddr string) (string, map[string]any, error) {
-	openUDPReverseListen := func(addr string) (*protocol.BufferedStream, string, error) {
-		cs, err := s.openStream()
-		if err != nil {
-			return nil, "", err
-		}
-		if err := protocol.WriteLineJSON(cs, protocol.StreamHeader{
-			StreamType:      protocol.StreamTypeUDPReverseListen,
-			TargetMachineID: machineID,
-			RemoteAddr:      addr,
-		}); err != nil {
-			_ = cs.Close()
-			return nil, "", err
-		}
-		var ack protocol.StreamAck
-		if err := cs.ReadLineJSON(&ack); err != nil {
-			_ = cs.Close()
-			return nil, "", fmt.Errorf("udp reverse_listen handshake failed: %w", err)
-		}
-		if !ack.OK {
-			_ = cs.Close()
-			return nil, "", fmt.Errorf("%s", ack.Error)
-		}
-		bound := ack.BoundAddr
-		if bound == "" {
-			bound = addr
-		}
-		return cs, bound, nil
-	}
-
-	ctrlStream, boundRemote, err := openUDPReverseListen(remoteAddr)
-	if err != nil {
-		return "", nil, err
-	}
-
-	id := fmt.Sprintf("%d", atomic.AddUint64(&s.fwdSeq, 1))
-	stopCh := make(chan struct{})
-	var stopOnce sync.Once
-	var streamMu sync.Mutex
-	curCtrl := ctrlStream
-
-	entry := &ForwardEntry{
-		ID:         id,
-		Protocol:   "udp",
-		Direction:  "local_to_remote",
-		MachineID:  machineID,
-		LocalAddr:  localAddr,
-		RemoteAddr: boundRemote,
-		CreatedAt:  time.Now(),
-		closeFn: func() {
-			stopOnce.Do(func() {
-				close(stopCh)
-			})
-			streamMu.Lock()
-			if curCtrl != nil {
-				_ = curCtrl.Close()
-			}
-			streamMu.Unlock()
-		},
-	}
-
-	s.fwdMu.Lock()
-	s.forwards[id] = entry
-	s.fwdMu.Unlock()
-
-	go func() {
-		defer func() {
-			streamMu.Lock()
-			if curCtrl != nil {
-				_ = curCtrl.Close()
-			}
-			streamMu.Unlock()
-			s.fwdMu.Lock()
-			if cur, ok := s.forwards[id]; ok && cur == entry {
-				delete(s.forwards, id)
-			}
-			s.fwdMu.Unlock()
-		}()
-
-		for {
-			streamMu.Lock()
-			activeStream := curCtrl
-			streamMu.Unlock()
-
-			if activeStream != nil {
-				for {
-					var ev protocol.ReverseConnEvent
-					if err := activeStream.ReadLineJSON(&ev); err != nil {
-						_ = activeStream.Close()
-						break
-					}
-					if ev.ConnID == "" {
-						continue
-					}
-					atomic.AddInt64(&entry.ActiveConns, 1)
-					go func(connID string) {
-						defer atomic.AddInt64(&entry.ActiveConns, -1)
-
-						lconn, err := net.Dial("udp", localAddr)
-						if err != nil {
-							return
-						}
-						defer lconn.Close()
-
-						acceptStream, err := s.openStream()
-						if err != nil {
-							return
-						}
-						defer acceptStream.Close()
-
-						if err := protocol.WriteLineJSON(acceptStream, protocol.StreamHeader{
-							StreamType:      protocol.StreamTypeUDPReverseAccept,
-							TargetMachineID: machineID,
-							ConnID:          connID,
-						}); err != nil {
-							return
-						}
-
-						var aAck protocol.StreamAck
-						if err := acceptStream.ReadLineJSON(&aAck); err != nil || !aAck.OK {
-							return
-						}
-
-						var wg sync.WaitGroup
-						wg.Add(2)
-						// Stream -> Local UDP
-						go func() {
-							defer wg.Done()
-							buf := make([]byte, protocol.MaxUDPPacketSize)
-							for {
-								n, err := protocol.ReadPacket(acceptStream, buf)
-								if err != nil {
-									break
-								}
-								if _, err := lconn.Write(buf[:n]); err != nil {
-									break
-								}
-							}
-							_ = lconn.Close()
-						}()
-						// Local UDP -> Stream
-						go func() {
-							defer wg.Done()
-							buf := make([]byte, protocol.MaxUDPPacketSize)
-							for {
-								n, err := lconn.Read(buf)
-								if err != nil {
-									break
-								}
-								if err := protocol.WritePacket(acceptStream, buf[:n]); err != nil {
-									break
-								}
-							}
-							_ = acceptStream.Close()
-						}()
-						wg.Wait()
-					}(ev.ConnID)
-				}
-			}
-
-			select {
-			case <-stopCh:
-				return
-			case <-time.After(time.Second):
-			}
-
-			nextStream, newBound, reErr := openUDPReverseListen(boundRemote)
-			if reErr != nil && boundRemote != remoteAddr {
-				nextStream, newBound, reErr = openUDPReverseListen(remoteAddr)
-			}
-			streamMu.Lock()
-			curCtrl = nextStream
-			if reErr == nil && newBound != "" {
-				boundRemote = newBound
-				entry.RemoteAddr = newBound
-			}
-			streamMu.Unlock()
-		}
-	}()
-
-	return fmt.Sprintf("Added local_to_remote forwarding #%s: remote %s -> local %s (machine %s, proto udp)", id, boundRemote, localAddr, machineID), map[string]any{
-		"id":          id,
-		"protocol":    "udp",
-		"direction":   "local_to_remote",
-		"local_addr":  localAddr,
-		"remote_addr": boundRemote,
 		"machine_id":  machineID,
 	}, nil
 }

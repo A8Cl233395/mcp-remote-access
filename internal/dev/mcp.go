@@ -249,7 +249,7 @@ func (m *MCPServer) dispatchTool(name string, rawArgs json.RawMessage) (string, 
 		}
 		return m.session.Download(args.RemotePath, args.LocalPath)
 
-	case "forwarding", "fowarding":
+	case "forwarding":
 		var args struct {
 			Action     string `json:"action"`
 			ID         string `json:"id,omitempty"`

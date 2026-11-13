@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
+	"sync"
 )
 
 // MaxUDPPacketSize is the maximum supported packet payload size (65535 bytes).
@@ -37,4 +39,39 @@ func ReadPacket(r io.Reader, buf []byte) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// RelayPacketConn bridges length-prefixed packets on stream with datagrams on a connected net.Conn.
+func RelayPacketConn(stream io.ReadWriteCloser, conn net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, MaxUDPPacketSize)
+		for {
+			n, err := ReadPacket(stream, buf)
+			if err != nil {
+				break
+			}
+			if _, err := conn.Write(buf[:n]); err != nil {
+				break
+			}
+		}
+		_ = conn.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, MaxUDPPacketSize)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				break
+			}
+			if err := WritePacket(stream, buf[:n]); err != nil {
+				break
+			}
+		}
+		_ = stream.Close()
+	}()
+	wg.Wait()
 }

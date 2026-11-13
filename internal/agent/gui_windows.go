@@ -82,7 +82,6 @@ const (
 	swShow          = 5
 	colorBtnFace    = 15
 	defaultGuiFont  = 17
-	idEditServer    = 101
 	idEditKey       = 102
 	idBtnConnect    = 103
 	idStaticStatus  = 104
@@ -118,12 +117,11 @@ type msg struct {
 }
 
 var (
-	guiMu          sync.Mutex
-	hwndMain       syscall.Handle
-	hwndServerEdit syscall.Handle
-	hwndKeyEdit    syscall.Handle
+	guiMu           sync.Mutex
+	hwndMain        syscall.Handle
+	hwndKeyEdit     syscall.Handle
 	hwndSaveFileChk syscall.Handle
-	hwndBtnConnect syscall.Handle
+	hwndBtnConnect  syscall.Handle
 	hwndStatus     syscall.Handle
 	latestStatus   string
 	guiCancel      context.CancelFunc

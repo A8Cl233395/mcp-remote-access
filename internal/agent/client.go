@@ -703,19 +703,7 @@ func (c *Client) handleTCPConnectStream(bs *protocol.BufferedStream, hdr protoco
 		return
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(targetConn, bs)
-		_ = targetConn.Close()
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(bs, targetConn)
-		_ = bs.Close()
-	}()
-	wg.Wait()
+	protocol.RelayBidirectional(targetConn, bs)
 }
 
 func (c *Client) handleReverseListenStream(bs *protocol.BufferedStream, hdr protocol.StreamHeader) {
@@ -802,19 +790,7 @@ func (c *Client) handleReverseAcceptStream(bs *protocol.BufferedStream, hdr prot
 		return
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(targetConn, bs)
-		_ = targetConn.Close()
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(bs, targetConn)
-		_ = bs.Close()
-	}()
-	wg.Wait()
+	protocol.RelayBidirectional(targetConn, bs)
 }
 
 func (c *Client) handleUDPConnectStream(bs *protocol.BufferedStream, hdr protocol.StreamHeader) {
@@ -842,42 +818,7 @@ func (c *Client) handleUDPConnectStream(bs *protocol.BufferedStream, hdr protoco
 		return
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Stream -> UDP
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, protocol.MaxUDPPacketSize)
-		for {
-			n, err := protocol.ReadPacket(bs, buf)
-			if err != nil {
-				break
-			}
-			if _, err := uconn.Write(buf[:n]); err != nil {
-				break
-			}
-		}
-		_ = uconn.Close()
-	}()
-
-	// UDP -> Stream
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, protocol.MaxUDPPacketSize)
-		for {
-			n, err := uconn.Read(buf)
-			if err != nil {
-				break
-			}
-			if err := protocol.WritePacket(bs, buf[:n]); err != nil {
-				break
-			}
-		}
-		_ = bs.Close()
-	}()
-
-	wg.Wait()
+	protocol.RelayPacketConn(bs, uconn)
 }
 
 func (c *Client) handleUDPReverseListenStream(bs *protocol.BufferedStream, hdr protocol.StreamHeader) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -179,4 +180,21 @@ func SendRPC(stream io.ReadWriteCloser, method string, params any) (*RPCResponse
 		return nil, fmt.Errorf("read rpc response: %w", err)
 	}
 	return &resp, nil
+}
+
+// RelayBidirectional copies bytes bidirectionally between a and b, closing each side when its copy ends.
+func RelayBidirectional(a, b io.ReadWriteCloser) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(a, b)
+		_ = a.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(b, a)
+		_ = b.Close()
+	}()
+	wg.Wait()
 }
