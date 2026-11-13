@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,5 +119,40 @@ func TestRestartStateHandoff(t *testing.T) {
 	}
 	if second := ConsumeRestartState(); second != nil {
 		t.Fatalf("expected nil on second ConsumeRestartState call, got %+v", second)
+	}
+}
+
+func TestPersistentConfigOnlyPersistsKeyAndMachineID(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPathOverride = filepath.Join(tmpDir, "mcp-remoteaccess", "user-client.json")
+	defer func() { configPathOverride = "" }()
+
+	// Legacy fields on disk should be ignored and stripped on save
+	if err := os.MkdirAll(filepath.Dir(configPathOverride), 0755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"server_addr":"old.example.com:20055","user_key":"k1","machine_id":"m1","shell":"bash","workdir":"/tmp"}`
+	if err := os.WriteFile(configPathOverride, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded := LoadPersistentConfig()
+	if loaded.UserKey != "k1" || loaded.MachineID != "m1" {
+		t.Fatalf("unexpected loaded config: %+v", loaded)
+	}
+
+	if err := SavePersistentConfig(loaded); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(configPathOverride)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 2 || m["user_key"] != "k1" || m["machine_id"] != "m1" {
+		t.Fatalf("expected persisted JSON to contain only user_key and machine_id, got %s", string(raw))
 	}
 }

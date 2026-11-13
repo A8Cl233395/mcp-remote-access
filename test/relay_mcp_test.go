@@ -434,6 +434,30 @@ func TestRelayServerMCPAndOAuth(t *testing.T) {
 		t.Fatalf("expected file in alphaDir, got err=%v data=%q", err, string(data))
 	}
 
+	// Passing machine_id inside tool arguments must NOT override sess1's active machine (node-alpha)
+	_, overrideWriteRes := callStreamableMCP(httpSrv.URL+"/mcp", accessToken, sess1, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      6,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "write",
+			"arguments": map[string]any{
+				"machine_id": "node-beta",
+				"path":       "no-override.txt",
+				"content":    "stay-on-alpha\n",
+			},
+		},
+	})
+	if overrideWriteRes["result"].(map[string]any)["isError"] == true {
+		t.Fatalf("write failed: %+v", overrideWriteRes)
+	}
+	if _, err := os.Stat(filepath.Join(betaDir, "no-override.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected machine_id override to be ignored (file must NOT exist in betaDir), but stat err=%v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(alphaDir, "no-override.txt")); err != nil || string(data) != "stay-on-alpha\n" {
+		t.Fatalf("expected file in alphaDir (sess1 active machine), got err=%v data=%q", err, string(data))
+	}
+
 	// Shell in sess2 runs on node-beta
 	_, shellRes := callStreamableMCP(keyQueryURL, "", sess2, map[string]any{
 		"jsonrpc": "2.0",

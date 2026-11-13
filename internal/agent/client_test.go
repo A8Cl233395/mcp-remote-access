@@ -221,3 +221,62 @@ func TestClientRunStopsOnUntrustedTLSCert(t *testing.T) {
 		t.Fatalf("expected TLS verification failed message, got %v", runErr)
 	}
 }
+
+func TestUDPReverseListenExitDeadlock(t *testing.T) {
+	client := NewClient(ClientOptions{
+		MachineID: "udp-deadlock-test",
+		Workdir:   t.TempDir(),
+	})
+	defer client.Close()
+
+	// Create an in-memory bidirectional stream pair via net.Pipe
+	devSide, agentSide := net.Pipe()
+	defer devSide.Close()
+
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		bs := protocol.NewBufferedStream(agentSide)
+		client.handleUDPReverseListenStream(bs, protocol.StreamHeader{
+			StreamType: protocol.StreamTypeUDPReverseListen,
+			RemoteAddr: "127.0.0.1:0",
+		})
+	}()
+
+	devBS := protocol.NewBufferedStream(devSide)
+	var ack protocol.StreamAck
+	if err := devBS.ReadLineJSON(&ack); err != nil {
+		t.Fatalf("read ack failed: %v", err)
+	}
+	if !ack.OK || ack.BoundAddr == "" {
+		t.Fatalf("unexpected ack: %+v", ack)
+	}
+
+	// Send a UDP datagram to the bound reverse listener so an agentUDPSession is inserted into sessions map
+	udpConn, err := net.Dial("udp", ack.BoundAddr)
+	if err != nil {
+		t.Fatalf("dial bound udp %s failed: %v", ack.BoundAddr, err)
+	}
+	defer udpConn.Close()
+	if _, err := udpConn.Write([]byte("trigger-session")); err != nil {
+		t.Fatalf("udp write failed: %v", err)
+	}
+
+	var ev protocol.ReverseConnEvent
+	if err := devBS.ReadLineJSON(&ev); err != nil {
+		t.Fatalf("read ReverseConnEvent failed: %v", err)
+	}
+	if ev.ConnID == "" {
+		t.Fatalf("expected non-empty ConnID")
+	}
+
+	// Close the control stream while the UDP session is still in the sessions map.
+	// Bug: defer in handleUDPReverseListenStream locks sessMu and calls s.Close() -> closeFn() -> sessMu.Lock() -> deadlock.
+	_ = devSide.Close()
+
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPReverseListenStream deadlocked on exit with active UDP session")
+	}
+}

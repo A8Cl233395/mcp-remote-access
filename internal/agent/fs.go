@@ -422,7 +422,11 @@ func ReadFileOrDirWithEncoding(rawPath, workdir string, offsetPtr, limitPtr *int
 			return "", nil, fmt.Errorf("Unable to decode %s (%s): %v", displayPath, encInfo.Name, decErr)
 		}
 		decodedBytes := []byte(decodedStr)
-		paged := len(decodedBytes) > MaxReadBytes || offsetPtr != nil || limitPtr != nil
+		lineCount := bytes.Count(decodedBytes, []byte{'\n'})
+		if len(decodedBytes) > 0 && decodedBytes[len(decodedBytes)-1] != '\n' {
+			lineCount++
+		}
+		paged := len(decodedBytes) > MaxReadBytes || lineCount > MaxReadLines || offsetPtr != nil || limitPtr != nil
 		if !paged {
 			if len(decodedBytes) == 0 {
 				header := fmt.Sprintf("Read file %s, 0 lines", displayPath)
@@ -1541,6 +1545,12 @@ func compileGlobRegex(pattern string) (*regexp.Regexp, error) {
 
 	var sb strings.Builder
 	sb.WriteString("^")
+	writeGlobSegment(&sb, p, true)
+	sb.WriteString("$")
+	return regexp.Compile(sb.String())
+}
+
+func writeGlobSegment(sb *strings.Builder, p string, allowBrace bool) {
 	i := 0
 	for i < len(p) {
 		ch := p[i]
@@ -1560,18 +1570,22 @@ func compileGlobRegex(pattern string) (*regexp.Regexp, error) {
 		case '?':
 			sb.WriteString("[^/]")
 		case '{':
-			end := strings.IndexByte(p[i:], '}')
-			if end != -1 {
-				inner := p[i+1 : i+end]
-				parts := strings.Split(inner, ",")
-				for idx, part := range parts {
-					parts[idx] = regexp.QuoteMeta(part)
+			if allowBrace {
+				end := strings.IndexByte(p[i:], '}')
+				if end != -1 {
+					inner := p[i+1 : i+end]
+					parts := strings.Split(inner, ",")
+					sb.WriteString("(?:")
+					for idx, part := range parts {
+						if idx > 0 {
+							sb.WriteByte('|')
+						}
+						writeGlobSegment(sb, part, false)
+					}
+					sb.WriteString(")")
+					i += end + 1
+					continue
 				}
-				sb.WriteString("(?:")
-				sb.WriteString(strings.Join(parts, "|"))
-				sb.WriteString(")")
-				i += end + 1
-				continue
 			}
 			sb.WriteString(`\{`)
 		case '.', '+', '^', '$', '(', ')', '[', ']', '|', '\\':
@@ -1582,6 +1596,4 @@ func compileGlobRegex(pattern string) (*regexp.Regexp, error) {
 		}
 		i++
 	}
-	sb.WriteString("$")
-	return regexp.Compile(sb.String())
 }

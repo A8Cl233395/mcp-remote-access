@@ -95,13 +95,7 @@ func (b *relayMCPBackend) SwitchMachine(targetID string) (string, map[string]any
 }
 
 func (b *relayMCPBackend) CallRPC(method string, params any) (*protocol.RPCResponse, error) {
-	targetID := b.sess.getActiveMachineID()
-	if pm, ok := params.(map[string]any); ok {
-		if override, ok := pm["machine_id"].(string); ok && strings.TrimSpace(override) != "" {
-			targetID = strings.TrimSpace(override)
-		}
-	}
-	return b.callRPCOnMachine(targetID, method, params)
+	return b.callRPCOnMachine(b.sess.getActiveMachineID(), method, params)
 }
 
 func (b *relayMCPBackend) callRPCOnMachine(targetMachineID, method string, params any) (*protocol.RPCResponse, error) {

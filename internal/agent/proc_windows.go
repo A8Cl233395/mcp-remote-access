@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
 func buildCmdExe(shellPath, command string) *exec.Cmd {
+	quotedShell := `"` + strings.Trim(shellPath, `"`) + `"`
 	cmd := exec.Command(shellPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow: true,
-		CmdLine:    fmt.Sprintf(`%s /d /s /c "%s"`, shellPath, command),
+		CmdLine:    fmt.Sprintf(`%s /d /s /c "%s"`, quotedShell, command),
 	}
 	return cmd
 }

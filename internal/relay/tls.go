@@ -13,6 +13,8 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -103,9 +105,105 @@ func (c *peekedConn) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
+// flexConn defers first-byte TLS-vs-plain detection from Accept() into the connection's
+// own goroutine so an idle TCP client never stalls the listener's Accept loop.
+type flexConn struct {
+	raw       net.Conn
+	tlsConfig *tls.Config
+
+	initOnce sync.Once
+	ready    atomic.Bool
+	active   net.Conn
+
+	dlMu              sync.Mutex
+	hasReadDeadline   bool
+	savedReadDeadline time.Time
+}
+
+func (c *flexConn) detect() {
+	br := bufio.NewReaderSize(c.raw, 4096)
+
+	c.dlMu.Lock()
+	hasDL := c.hasReadDeadline
+	savedDL := c.savedReadDeadline
+	c.dlMu.Unlock()
+
+	if !hasDL {
+		_ = c.raw.SetReadDeadline(time.Now().Add(10 * time.Second))
+	}
+	first, err := br.Peek(1)
+	if !hasDL {
+		_ = c.raw.SetReadDeadline(time.Time{})
+	} else {
+		_ = c.raw.SetReadDeadline(savedDL)
+	}
+
+	pConn := &peekedConn{Conn: c.raw, r: br}
+	if err == nil && len(first) == 1 && first[0] == 0x16 && c.tlsConfig != nil {
+		c.active = tls.Server(pConn, c.tlsConfig)
+	} else {
+		c.active = pConn
+	}
+	c.ready.Store(true)
+}
+
+func (c *flexConn) Read(p []byte) (int, error) {
+	c.initOnce.Do(c.detect)
+	return c.active.Read(p)
+}
+
+func (c *flexConn) Write(p []byte) (int, error) {
+	c.initOnce.Do(c.detect)
+	return c.active.Write(p)
+}
+
+func (c *flexConn) Close() error {
+	if c.ready.Load() {
+		return c.active.Close()
+	}
+	return c.raw.Close()
+}
+
+func (c *flexConn) LocalAddr() net.Addr {
+	return c.raw.LocalAddr()
+}
+
+func (c *flexConn) RemoteAddr() net.Addr {
+	return c.raw.RemoteAddr()
+}
+
+func (c *flexConn) SetDeadline(t time.Time) error {
+	if c.ready.Load() {
+		return c.active.SetDeadline(t)
+	}
+	c.dlMu.Lock()
+	c.hasReadDeadline = !t.IsZero()
+	c.savedReadDeadline = t
+	c.dlMu.Unlock()
+	return c.raw.SetDeadline(t)
+}
+
+func (c *flexConn) SetReadDeadline(t time.Time) error {
+	if c.ready.Load() {
+		return c.active.SetReadDeadline(t)
+	}
+	c.dlMu.Lock()
+	c.hasReadDeadline = !t.IsZero()
+	c.savedReadDeadline = t
+	c.dlMu.Unlock()
+	return c.raw.SetReadDeadline(t)
+}
+
+func (c *flexConn) SetWriteDeadline(t time.Time) error {
+	if c.ready.Load() {
+		return c.active.SetWriteDeadline(t)
+	}
+	return c.raw.SetWriteDeadline(t)
+}
+
 // FlexTLSListener wraps a net.Listener. If allowPlainHTTP is true (in -insecure mode),
-// it peeks at the first byte of each incoming connection: if it is 0x16 (TLS Handshake),
-// it negotiates TLS; otherwise it passes the connection through as plain HTTP/WS.
+// it wraps accepted connections so the first incoming byte is peeked per-connection:
+// if it is 0x16 (TLS Handshake), it negotiates TLS; otherwise it passes through as plain HTTP/WS.
 type FlexTLSListener struct {
 	net.Listener
 	tlsConfig      *tls.Config
@@ -128,13 +226,8 @@ func (l *FlexTLSListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	br := bufio.NewReaderSize(rawConn, 4096)
-	_ = rawConn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	first, err := br.Peek(1)
-	_ = rawConn.SetReadDeadline(time.Time{})
-	pConn := &peekedConn{Conn: rawConn, r: br}
-	if err == nil && len(first) == 1 && first[0] == 0x16 && l.tlsConfig != nil {
-		return tls.Server(pConn, l.tlsConfig), nil
-	}
-	return pConn, nil
+	return &flexConn{
+		raw:       rawConn,
+		tlsConfig: l.tlsConfig,
+	}, nil
 }

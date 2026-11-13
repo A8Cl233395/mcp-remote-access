@@ -1055,11 +1055,15 @@ func (c *Client) handleUDPReverseListenStream(bs *protocol.BufferedStream, hdr p
 
 	defer func() {
 		sessMu.Lock()
+		var toClose []*agentUDPSession
 		for _, s := range sessions {
-			s.Close()
+			toClose = append(toClose, s)
 		}
 		sessions = nil
 		sessMu.Unlock()
+		for _, s := range toClose {
+			s.Close()
+		}
 	}()
 
 	buf := make([]byte, protocol.MaxUDPPacketSize)
@@ -1119,6 +1123,7 @@ func (c *Client) handleUDPReverseListenStream(bs *protocol.BufferedStream, hdr p
 			writeMu.Unlock()
 			if wErr != nil {
 				sessMu.Unlock()
+				sess.Close()
 				return
 			}
 		}

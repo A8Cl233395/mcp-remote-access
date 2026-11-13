@@ -6,16 +6,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-
-	"mcp-remoteaccess/internal/protocol"
 )
 
 type PersistentConfig struct {
-	ServerAddr string `json:"server_addr"`
-	UserKey    string `json:"user_key"`
-	MachineID  string `json:"machine_id"`
-	Shell      string `json:"shell,omitempty"`
-	Workdir    string `json:"workdir,omitempty"`
+	UserKey   string `json:"user_key"`
+	MachineID string `json:"machine_id"`
 }
 
 var configPathOverride string
@@ -53,9 +48,6 @@ func LoadPersistentConfig() PersistentConfig {
 	data, err := os.ReadFile(ConfigFilePath())
 	if err == nil {
 		_ = json.Unmarshal(data, &cfg)
-	}
-	if cfg.ServerAddr == "" {
-		cfg.ServerAddr = protocol.DefaultServerAddr
 	}
 	if cfg.MachineID == "" {
 		host, _ := os.Hostname()

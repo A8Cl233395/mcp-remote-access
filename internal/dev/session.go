@@ -22,6 +22,7 @@ import (
 )
 
 type ForwardEntry struct {
+	mu          sync.RWMutex
 	ID          string
 	Protocol    string // "tcp" | "udp"
 	Direction   string // "remote_to_local" | "local_to_remote"
@@ -31,6 +32,18 @@ type ForwardEntry struct {
 	CreatedAt   time.Time
 	ActiveConns int64
 	closeFn     func()
+}
+
+func (f *ForwardEntry) getRemoteAddr() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.RemoteAddr
+}
+
+func (f *ForwardEntry) setRemoteAddr(addr string) {
+	f.mu.Lock()
+	f.RemoteAddr = addr
+	f.mu.Unlock()
 }
 
 type SessionConfig struct {
@@ -521,7 +534,7 @@ func (s *Session) listForwards() (string, map[string]any, error) {
 			f.Direction,
 			f.LocalAddr,
 			arrow,
-			f.RemoteAddr,
+			f.getRemoteAddr(),
 			f.MachineID,
 			atomic.LoadInt64(&f.ActiveConns),
 		))
@@ -552,7 +565,7 @@ func (s *Session) removeForward(id string) (string, map[string]any, error) {
 	if protoLabel == "" {
 		protoLabel = "tcp"
 	}
-	return fmt.Sprintf("Removed port forwarding rule #%s (%s: local %s <-> remote %s)", entry.ID, entry.Direction, entry.LocalAddr, entry.RemoteAddr), map[string]any{
+	return fmt.Sprintf("Removed port forwarding rule #%s (%s: local %s <-> remote %s)", entry.ID, entry.Direction, entry.LocalAddr, entry.getRemoteAddr()), map[string]any{
 		"id":       entry.ID,
 		"protocol": protoLabel,
 	}, nil
@@ -833,11 +846,28 @@ func (s *Session) addLocalToRemote(machineID, proto, localAddr, remoteAddr strin
 			if reErr != nil && boundRemote != remoteAddr {
 				nextStream, newBound, reErr = openReverseListen(remoteAddr)
 			}
+			select {
+			case <-stopCh:
+				if nextStream != nil {
+					_ = nextStream.Close()
+				}
+				return
+			default:
+			}
 			streamMu.Lock()
+			select {
+			case <-stopCh:
+				streamMu.Unlock()
+				if nextStream != nil {
+					_ = nextStream.Close()
+				}
+				return
+			default:
+			}
 			curCtrl = nextStream
 			if reErr == nil && newBound != "" {
 				boundRemote = newBound
-				entry.RemoteAddr = newBound
+				entry.setRemoteAddr(newBound)
 			}
 			streamMu.Unlock()
 		}

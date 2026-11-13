@@ -30,6 +30,8 @@ var (
 	procSendMessageW     = user32.NewProc("SendMessageW")
 	procPostMessageW     = user32.NewProc("PostMessageW")
 	procMessageBoxW      = user32.NewProc("MessageBoxW")
+	procIsDialogMessageW = user32.NewProc("IsDialogMessageW")
+	procSetFocus         = user32.NewProc("SetFocus")
 	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
 	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
 	procAttachConsole    = kernel32.NewProc("AttachConsole")
@@ -68,6 +70,7 @@ const (
 	wsTabStop          = 0x00010000
 	esAutoHScroll      = 0x0080
 	bsPushButton       = 0x00000000
+	bsDefPushButton    = 0x00000001
 	bsAutoCheckbox     = 0x00000003
 
 	bmGetCheck         = 0x00F0
@@ -221,7 +224,7 @@ func updateGUIStatus(st string) {
 	h := hwndMain
 	guiMu.Unlock()
 	if h != 0 {
-		_, _, _ = procSendMessageW.Call(uintptr(h), wmAppStat, 0, 0)
+		_, _, _ = procPostMessageW.Call(uintptr(h), wmAppStat, 0, 0)
 	}
 }
 
@@ -272,8 +275,9 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		}
 		_, _, _ = procSendMessageW.Call(uintptr(hwndSaveFileChk), bmSetCheck, uintptr(initCheck), 0)
 
-		hwndBtnConnect = createCtrl("BUTTON", "Connect", wsChild|wsVisible|wsTabStop|bsPushButton, 115, 76, 120, 28, idBtnConnect)
+		hwndBtnConnect = createCtrl("BUTTON", "Connect", wsChild|wsVisible|wsTabStop|bsDefPushButton, 115, 76, 120, 28, idBtnConnect)
 		hwndStatus = createCtrl("STATIC", "Status: Idle", wsChild|wsVisible, 16, 112, 385, 44, idStaticStatus)
+		_, _, _ = procSetFocus.Call(uintptr(hwndKeyEdit))
 		return 0
 
 	case wmCommand:
@@ -314,6 +318,11 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 		guiMu.Lock()
 		guiRunSeq++
 		latestError = ""
+		hwndMain = 0
+		hwndKeyEdit = 0
+		hwndSaveFileChk = 0
+		hwndBtnConnect = 0
+		hwndStatus = 0
 		if guiCancel != nil {
 			guiCancel()
 			guiCancel = nil
@@ -360,7 +369,9 @@ func RunGUI(opts ClientOptions) error {
 		250, 250, 435, 210,
 		0, 0, hInst, 0,
 	)
+	guiMu.Lock()
 	hwndMain = syscall.Handle(h)
+	guiMu.Unlock()
 	_, _, _ = procShowWindow.Call(h, swShow)
 	_, _, _ = procUpdateWindow.Call(h)
 
@@ -376,8 +387,11 @@ func RunGUI(opts ClientOptions) error {
 		if int32(ret) <= 0 {
 			break
 		}
-		_, _, _ = procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
-		_, _, _ = procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+		handled, _, _ := procIsDialogMessageW.Call(uintptr(hwndMain), uintptr(unsafe.Pointer(&m)))
+		if handled == 0 {
+			_, _, _ = procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+			_, _, _ = procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+		}
 	}
 	return nil
 }

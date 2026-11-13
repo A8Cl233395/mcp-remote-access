@@ -23,8 +23,8 @@ func main() {
 	defaultServer := envOrDefault("MCP_SERVER_ADDR", protocol.DefaultServerAddr)
 	defaultKey := envOrDefault("MCP_USER_KEY", saved.UserKey)
 	defaultID := envOrDefault("MCP_MACHINE_ID", saved.MachineID)
-	defaultShell := envOrDefault("MCP_SHELL", saved.Shell)
-	defaultWorkdir := envOrDefault("MCP_WORKDIR", saved.Workdir)
+	defaultShell := envOrDefault("MCP_SHELL", "")
+	defaultWorkdir := envOrDefault("MCP_WORKDIR", "")
 	defaultInsecure := envOrDefault("MCP_INSECURE", "") == "1"
 	if handoff != nil {
 		if handoff.ServerAddr != "" {
@@ -75,11 +75,9 @@ func main() {
 			opts.UserKey = "default-user-key"
 		}
 		if *saveFile {
-			saved.ServerAddr = opts.ServerAddr
 			saved.UserKey = opts.UserKey
-			saved.MachineID = opts.MachineID
-			if opts.Shell != "" {
-				saved.Shell = opts.Shell
+			if opts.MachineID != "" {
+				saved.MachineID = opts.MachineID
 			}
 			_ = agent.SavePersistentConfig(saved)
 		}
