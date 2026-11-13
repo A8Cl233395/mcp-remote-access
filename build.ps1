@@ -1,5 +1,6 @@
 param(
-    [string]$DefaultServer = ""
+    [string]$DefaultServer = "",
+    [switch]$SkipHook
 )
 
 $ErrorActionPreference = "Stop"
@@ -107,3 +108,18 @@ Copy-Item -Force (Join-Path $BinDir "user-client-linux-arm64") (Join-Path $Relea
 
 Write-Host "==> Build complete! Artifacts in ./bin and ./releases:" -ForegroundColor Green
 Get-ChildItem $BinDir, $ReleasesDir | Select-Object FullName, Length
+
+if (-not $SkipHook -and $env:SKIP_POST_BUILD_HOOK -ne "1") {
+    $HookScript = if ($env:POST_BUILD_HOOK) { $env:POST_BUILD_HOOK } else { Join-Path $RootDir "post-build.ps1" }
+    if (Test-Path $HookScript) {
+        Write-Host "==> Running post-build hook: $HookScript" -ForegroundColor Cyan
+        $env:MCP_ROOT_DIR = $RootDir
+        $env:MCP_BIN_DIR = $BinDir
+        $env:MCP_RELEASES_DIR = $ReleasesDir
+        $global:LASTEXITCODE = 0
+        & $HookScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "Post-build hook failed with exit code $LASTEXITCODE"
+        }
+    }
+}

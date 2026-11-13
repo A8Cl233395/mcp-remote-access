@@ -2,6 +2,7 @@
 set -euo pipefail
 
 CLI_DEFAULT_SERVER=""
+SKIP_HOOK="${SKIP_POST_BUILD_HOOK:-0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -DefaultServer|--default-server|-s|--server)
@@ -16,8 +17,12 @@ while [[ $# -gt 0 ]]; do
             CLI_DEFAULT_SERVER="${1#*=}"
             shift
             ;;
+        -SkipHook|--skip-hook)
+            SKIP_HOOK=1
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--default-server <host:port> | <host:port>]"
+            echo "Usage: $0 [--default-server <host:port> | <host:port>] [--skip-hook]"
             exit 0
             ;;
         -*)
@@ -184,3 +189,12 @@ cp -f "$BIN_DIR/user-client-linux-arm64" "$RELEASES_DIR/user-client-linux-arm64"
 
 echo "==> Build complete! Artifacts in ./bin and ./releases:"
 ls -lh "$BIN_DIR" "$RELEASES_DIR"
+
+if [[ "$SKIP_HOOK" != "1" ]]; then
+    HOOK_SCRIPT="${POST_BUILD_HOOK:-$ROOT_DIR/post-build.sh}"
+    if [[ -f "$HOOK_SCRIPT" ]]; then
+        echo "==> Running post-build hook: $HOOK_SCRIPT"
+        MCP_ROOT_DIR="$ROOT_DIR" MCP_BIN_DIR="$BIN_DIR" MCP_RELEASES_DIR="$RELEASES_DIR" \
+            bash "$HOOK_SCRIPT"
+    fi
+fi

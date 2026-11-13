@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Local build hooks
+post-build.*
+
 # Compiled binaries and release artifacts
 /bin/
 /releases/
