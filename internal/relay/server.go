@@ -27,6 +27,7 @@ type Config struct {
 	UserKey     string
 	DevKey      string
 	ReleasesDir string
+	EnableMCP   bool
 	Logger      *log.Logger
 }
 
@@ -65,6 +66,9 @@ type Server struct {
 	agents        map[string]*AgentSession
 	manifestMu    sync.Mutex
 	manifestCache map[string]cachedManifest
+
+	mcpMu       sync.Mutex
+	mcpSessions map[string]*mcpSession
 }
 
 func NewServer(cfg Config) *Server {
@@ -83,6 +87,7 @@ func NewServer(cfg Config) *Server {
 		},
 		agents:        make(map[string]*AgentSession),
 		manifestCache: make(map[string]cachedManifest),
+		mcpSessions:   make(map[string]*mcpSession),
 	}
 }
 
@@ -93,6 +98,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/update/binary", s.handleUpdateBinary)
 	mux.HandleFunc("/ws/user", s.handleWSUser)
 	mux.HandleFunc("/ws/dev", s.handleWSDev)
+
+	if s.cfg.EnableMCP {
+		// Server-side MCP endpoints (Streamable HTTP + Legacy HTTP+SSE)
+		mux.HandleFunc("/mcp", s.withCORS(s.handleMCP))
+		mux.HandleFunc("/sse", s.withCORS(s.handleMCPSSE))
+		mux.HandleFunc("/messages", s.withCORS(s.handleMCPMessages))
+
+		// Minimal OAuth 2.0 shim for MCP clients (validates client_secret against DevKey)
+		mux.HandleFunc("/.well-known/oauth-protected-resource", s.withCORS(s.handleOAuthProtectedResource))
+		mux.HandleFunc("/.well-known/oauth-protected-resource/", s.withCORS(s.handleOAuthProtectedResource))
+		mux.HandleFunc("/.well-known/oauth-authorization-server", s.withCORS(s.handleOAuthAuthorizationServer))
+		mux.HandleFunc("/.well-known/oauth-authorization-server/", s.withCORS(s.handleOAuthAuthorizationServer))
+		mux.HandleFunc("/.well-known/openid-configuration", s.withCORS(s.handleOAuthAuthorizationServer))
+		mux.HandleFunc("/.well-known/openid-configuration/", s.withCORS(s.handleOAuthAuthorizationServer))
+		mux.HandleFunc("/oauth/authorize", s.withCORS(s.handleOAuthAuthorize))
+		mux.HandleFunc("/oauth/token", s.withCORS(s.handleOAuthToken))
+	}
 	return mux
 }
 

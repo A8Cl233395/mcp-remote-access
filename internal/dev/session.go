@@ -198,16 +198,11 @@ func (s *Session) FetchMachines() ([]protocol.MachineInfo, error) {
 	return machines, nil
 }
 
-func (s *Session) ListMachinesFormatted() (string, map[string]any, error) {
-	machines, err := s.FetchMachines()
-	if err != nil {
-		return "", nil, err
-	}
+func FormatMachinesList(machines []protocol.MachineInfo, activeID string) (string, map[string]any) {
 	if len(machines) == 0 {
-		return "No target machines are currently connected to the relay server.", map[string]any{"count": 0}, nil
+		return "No target machines are currently connected to the relay server.", map[string]any{"count": 0}
 	}
 
-	activeID := s.GetActiveMachineID()
 	var lines []string
 	lines = append(lines, fmt.Sprintf("Connected machines (%d):", len(machines)))
 	for _, m := range machines {
@@ -246,29 +241,10 @@ func (s *Session) ListMachinesFormatted() (string, map[string]any, error) {
 		"count":          len(machines),
 		"active_machine": activeID,
 		"machines":       machines,
-	}, nil
+	}
 }
 
-func (s *Session) SwitchMachine(targetID string) (string, map[string]any, error) {
-	targetID = strings.TrimSpace(targetID)
-	if targetID == "" {
-		return s.ListMachinesFormatted()
-	}
-
-	resp, err := s.CallRPCOnMachine(targetID, "machine_info", nil)
-	if err != nil {
-		return "", nil, err
-	}
-	if !resp.OK {
-		return "", nil, fmt.Errorf("%s", resp.Error)
-	}
-	if resp.Machine == nil {
-		return "", nil, fmt.Errorf("target machine did not return machine info")
-	}
-
-	m := *resp.Machine
-	s.SetActiveMachineID(m.MachineID)
-
+func FormatSwitchMachine(m protocol.MachineInfo) (string, map[string]any) {
 	adminStr := "no"
 	if m.IsAdmin {
 		adminStr = "yes"
@@ -294,7 +270,39 @@ func (s *Session) SwitchMachine(targetID string) (string, map[string]any, error)
 
 	return summary, map[string]any{
 		"machine": m,
-	}, nil
+	}
+}
+
+func (s *Session) ListMachinesFormatted() (string, map[string]any, error) {
+	machines, err := s.FetchMachines()
+	if err != nil {
+		return "", nil, err
+	}
+	text, meta := FormatMachinesList(machines, s.GetActiveMachineID())
+	return text, meta, nil
+}
+
+func (s *Session) SwitchMachine(targetID string) (string, map[string]any, error) {
+	targetID = strings.TrimSpace(targetID)
+	if targetID == "" {
+		return s.ListMachinesFormatted()
+	}
+
+	resp, err := s.CallRPCOnMachine(targetID, "machine_info", nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if !resp.OK {
+		return "", nil, fmt.Errorf("%s", resp.Error)
+	}
+	if resp.Machine == nil {
+		return "", nil, fmt.Errorf("target machine did not return machine info")
+	}
+
+	m := *resp.Machine
+	s.SetActiveMachineID(m.MachineID)
+	text, meta := FormatSwitchMachine(m)
+	return text, meta, nil
 }
 
 func (s *Session) CallRPC(method string, params any) (*protocol.RPCResponse, error) {

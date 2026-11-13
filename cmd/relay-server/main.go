@@ -18,6 +18,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", envOrDefault("RELAY_TLS_CERT", ""), "Path to SSL/TLS certificate PEM file (e.g. fullchain.pem)")
 	tlsKey := flag.String("tls-key", envOrDefault("RELAY_TLS_KEY", ""), "Path to SSL/TLS private key PEM file (e.g. privkey.pem)")
 	insecure := flag.Bool("insecure", envOrDefault("RELAY_INSECURE", "") == "1", "Allow running without a formal SSL certificate (uses self-signed TLS and accepts plain HTTP/WS)")
+	enableMCP := flag.Bool("mcp", envOrDefault("RELAY_ENABLE_MCP", "") == "1", "Expose server-side HTTP/SSE MCP endpoints (/mcp, /sse) and OAuth shim")
 	flag.Parse()
 
 	if err := os.MkdirAll(*releasesDir, 0755); err != nil {
@@ -38,6 +39,7 @@ func main() {
 		UserKey:     *userKey,
 		DevKey:      *devKey,
 		ReleasesDir: *releasesDir,
+		EnableMCP:   *enableMCP,
 	})
 
 	ln, err := net.Listen("tcp", *addr)
@@ -47,9 +49,9 @@ func main() {
 
 	listener := relay.NewFlexTLSListener(ln, tlsCfg, *insecure && *tlsCert == "")
 	if *insecure && *tlsCert == "" {
-		log.Printf("[relay-server] listening on %s in -insecure mode (self-signed HTTPS/WSS + plain HTTP/WS enabled, releases-dir=%s)", *addr, *releasesDir)
+		log.Printf("[relay-server] listening on %s in -insecure mode (self-signed HTTPS/WSS + plain HTTP/WS enabled, releases-dir=%s, mcp=%v)", *addr, *releasesDir, *enableMCP)
 	} else {
-		log.Printf("[relay-server] listening on %s with strict HTTPS/WSS (cert=%s, releases-dir=%s)", *addr, *tlsCert, *releasesDir)
+		log.Printf("[relay-server] listening on %s with strict HTTPS/WSS (cert=%s, releases-dir=%s, mcp=%v)", *addr, *tlsCert, *releasesDir, *enableMCP)
 	}
 
 	httpSrv := &http.Server{

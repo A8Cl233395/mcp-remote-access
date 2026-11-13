@@ -6,7 +6,26 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"mcp-remoteaccess/internal/protocol"
 )
+
+type ToolBackend interface {
+	ListMachinesFormatted() (string, map[string]any, error)
+	SwitchMachine(targetID string) (string, map[string]any, error)
+	CallRPC(method string, params any) (*protocol.RPCResponse, error)
+}
+
+type LocalToolBackend interface {
+	ToolBackend
+	Upload(localPath, remotePath string) (string, map[string]any, error)
+	Download(remotePath, localPath string) (string, map[string]any, error)
+	Forwarding(action, id, proto, direction, localAddr, remoteAddr string) (string, map[string]any, error)
+}
+
+type MCPServerOptions struct {
+	DisableLocalTools bool
+}
 
 type JSONRPCMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -41,12 +60,37 @@ type MCPCallToolResult struct {
 }
 
 type MCPServer struct {
-	session *Session
+	backend ToolBackend
+	opts    MCPServerOptions
 	writeMu sync.Mutex
 }
 
 func NewMCPServer(session *Session) *MCPServer {
-	return &MCPServer{session: session}
+	return &MCPServer{backend: session}
+}
+
+func NewMCPServerWithBackend(backend ToolBackend, opts MCPServerOptions) *MCPServer {
+	return &MCPServer{
+		backend: backend,
+		opts:    opts,
+	}
+}
+
+func (m *MCPServer) ToolDefinitions() []MCPToolDefinition {
+	all := ToolDefinitions()
+	if !m.opts.DisableLocalTools {
+		return all
+	}
+	filtered := make([]MCPToolDefinition, 0, len(all))
+	for _, t := range all {
+		switch t.Name {
+		case "upload", "download", "forwarding":
+			continue
+		default:
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }
 
 func (m *MCPServer) ServeStdio(r io.Reader, w io.Writer) error {
@@ -85,13 +129,30 @@ func (m *MCPServer) sendResponse(w io.Writer, msg JSONRPCMessage) {
 }
 
 func (m *MCPServer) handleRawMessage(payload []byte, w io.Writer) {
+	resp, parseErr := m.HandleJSONRPC(payload)
+	if parseErr != nil || resp == nil {
+		return
+	}
+	m.sendResponse(w, *resp)
+}
+
+// HandleJSONRPC processes one JSON-RPC 2.0 request/notification payload.
+// Notifications return (nil, nil). Malformed JSON returns a -32700 error response and a non-nil error.
+func (m *MCPServer) HandleJSONRPC(payload []byte) (*JSONRPCMessage, error) {
 	var req JSONRPCMessage
 	if err := json.Unmarshal(payload, &req); err != nil {
-		return
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      json.RawMessage("null"),
+			Error: &JSONRPCError{
+				Code:    -32700,
+				Message: fmt.Sprintf("parse error: %v", err),
+			},
+		}, err
 	}
 	// Notifications have no ID
 	if len(req.ID) == 0 || string(req.ID) == "null" {
-		return
+		return nil, nil
 	}
 
 	switch req.Method {
@@ -104,8 +165,9 @@ func (m *MCPServer) handleRawMessage(payload []byte, w io.Writer) {
 		if protoVer == "" {
 			protoVer = "2024-11-05"
 		}
-		m.sendResponse(w, JSONRPCMessage{
-			ID: req.ID,
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
 			Result: map[string]any{
 				"protocolVersion": protoVer,
 				"capabilities": map[string]any{
@@ -118,21 +180,23 @@ func (m *MCPServer) handleRawMessage(payload []byte, w io.Writer) {
 					"version": "1.0.0",
 				},
 			},
-		})
+		}, nil
 
 	case "ping":
-		m.sendResponse(w, JSONRPCMessage{
-			ID:     req.ID,
-			Result: map[string]any{},
-		})
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{},
+		}, nil
 
 	case "tools/list":
-		m.sendResponse(w, JSONRPCMessage{
-			ID: req.ID,
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
 			Result: map[string]any{
-				"tools": ToolDefinitions(),
+				"tools": m.ToolDefinitions(),
 			},
-		})
+		}, nil
 
 	case "tools/call":
 		var callParams struct {
@@ -140,41 +204,45 @@ func (m *MCPServer) handleRawMessage(payload []byte, w io.Writer) {
 			Arguments json.RawMessage `json:"arguments"`
 		}
 		if err := json.Unmarshal(req.Params, &callParams); err != nil {
-			m.sendResponse(w, JSONRPCMessage{
-				ID: req.ID,
+			return &JSONRPCMessage{
+				JSONRPC: "2.0",
+				ID:      req.ID,
 				Error: &JSONRPCError{
 					Code:    -32602,
 					Message: fmt.Sprintf("invalid tools/call params: %v", err),
 				},
-			})
-			return
+			}, nil
 		}
 		res := m.CallTool(callParams.Name, callParams.Arguments)
-		m.sendResponse(w, JSONRPCMessage{
-			ID:     req.ID,
-			Result: res,
-		})
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  res,
+		}, nil
 
 	case "resources/list":
-		m.sendResponse(w, JSONRPCMessage{
-			ID:     req.ID,
-			Result: map[string]any{"resources": []any{}},
-		})
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{"resources": []any{}},
+		}, nil
 
 	case "prompts/list":
-		m.sendResponse(w, JSONRPCMessage{
-			ID:     req.ID,
-			Result: map[string]any{"prompts": []any{}},
-		})
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{"prompts": []any{}},
+		}, nil
 
 	default:
-		m.sendResponse(w, JSONRPCMessage{
-			ID: req.ID,
+		return &JSONRPCMessage{
+			JSONRPC: "2.0",
+			ID:      req.ID,
 			Error: &JSONRPCError{
 				Code:    -32601,
 				Message: fmt.Sprintf("method not found: %s", req.Method),
 			},
-		})
+		}, nil
 	}
 }
 
@@ -200,7 +268,7 @@ func (m *MCPServer) CallTool(name string, rawArgs json.RawMessage) MCPCallToolRe
 func (m *MCPServer) dispatchTool(name string, rawArgs json.RawMessage) (string, map[string]any, error) {
 	switch name {
 	case "list_machines":
-		return m.session.ListMachinesFormatted()
+		return m.backend.ListMachinesFormatted()
 
 	case "switch_machine":
 		var args struct {
@@ -209,12 +277,12 @@ func (m *MCPServer) dispatchTool(name string, rawArgs json.RawMessage) (string, 
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", nil, err
 		}
-		return m.session.SwitchMachine(args.MachineID)
+		return m.backend.SwitchMachine(args.MachineID)
 
 	case "switch_workdir", "read", "write", "edit", "glob", "grep", "shell", "job_list", "job_read", "job_kill":
 		var generic any
 		_ = json.Unmarshal(rawArgs, &generic)
-		resp, err := m.session.CallRPC(name, generic)
+		resp, err := m.backend.CallRPC(name, generic)
 		if err != nil {
 			return "", nil, err
 		}
@@ -223,49 +291,60 @@ func (m *MCPServer) dispatchTool(name string, rawArgs json.RawMessage) (string, 
 		}
 		return resp.Content, resp.Metadata, nil
 
-	case "upload":
-		var args struct {
-			LocalPath  string `json:"local_path"`
-			RemotePath string `json:"remote_path"`
+	case "upload", "download", "forwarding":
+		if m.opts.DisableLocalTools {
+			return "", nil, fmt.Errorf("tool %q is disabled on server-side MCP endpoint", name)
 		}
-		if err := json.Unmarshal(rawArgs, &args); err != nil {
-			return "", nil, err
+		localBackend, ok := m.backend.(LocalToolBackend)
+		if !ok {
+			return "", nil, fmt.Errorf("tool %q is not supported by this MCP backend", name)
 		}
-		if args.LocalPath == "" || args.RemotePath == "" {
-			return "", nil, fmt.Errorf("upload requires both `local_path` and `remote_path`")
-		}
-		return m.session.Upload(args.LocalPath, args.RemotePath)
+		switch name {
+		case "upload":
+			var args struct {
+				LocalPath  string `json:"local_path"`
+				RemotePath string `json:"remote_path"`
+			}
+			if err := json.Unmarshal(rawArgs, &args); err != nil {
+				return "", nil, err
+			}
+			if args.LocalPath == "" || args.RemotePath == "" {
+				return "", nil, fmt.Errorf("upload requires both `local_path` and `remote_path`")
+			}
+			return localBackend.Upload(args.LocalPath, args.RemotePath)
 
-	case "download":
-		var args struct {
-			RemotePath string `json:"remote_path"`
-			LocalPath  string `json:"local_path"`
-		}
-		if err := json.Unmarshal(rawArgs, &args); err != nil {
-			return "", nil, err
-		}
-		if args.RemotePath == "" || args.LocalPath == "" {
-			return "", nil, fmt.Errorf("download requires both `remote_path` and `local_path`")
-		}
-		return m.session.Download(args.RemotePath, args.LocalPath)
+		case "download":
+			var args struct {
+				RemotePath string `json:"remote_path"`
+				LocalPath  string `json:"local_path"`
+			}
+			if err := json.Unmarshal(rawArgs, &args); err != nil {
+				return "", nil, err
+			}
+			if args.RemotePath == "" || args.LocalPath == "" {
+				return "", nil, fmt.Errorf("download requires both `remote_path` and `local_path`")
+			}
+			return localBackend.Download(args.RemotePath, args.LocalPath)
 
-	case "forwarding":
-		var args struct {
-			Action     string `json:"action"`
-			ID         string `json:"id,omitempty"`
-			Protocol   string `json:"protocol,omitempty"`
-			Direction  string `json:"direction,omitempty"`
-			LocalAddr  string `json:"local_addr,omitempty"`
-			RemoteAddr string `json:"remote_addr,omitempty"`
+		case "forwarding":
+			var args struct {
+				Action     string `json:"action"`
+				ID         string `json:"id,omitempty"`
+				Protocol   string `json:"protocol,omitempty"`
+				Direction  string `json:"direction,omitempty"`
+				LocalAddr  string `json:"local_addr,omitempty"`
+				RemoteAddr string `json:"remote_addr,omitempty"`
+			}
+			if err := json.Unmarshal(rawArgs, &args); err != nil {
+				return "", nil, err
+			}
+			return localBackend.Forwarding(args.Action, args.ID, args.Protocol, args.Direction, args.LocalAddr, args.RemoteAddr)
 		}
-		if err := json.Unmarshal(rawArgs, &args); err != nil {
-			return "", nil, err
-		}
-		return m.session.Forwarding(args.Action, args.ID, args.Protocol, args.Direction, args.LocalAddr, args.RemoteAddr)
 
 	default:
 		return "", nil, fmt.Errorf("unknown tool: %s", name)
 	}
+	return "", nil, fmt.Errorf("unknown tool: %s", name)
 }
 
 func ToolDefinitions() []MCPToolDefinition {
