@@ -183,6 +183,8 @@ func (c *Client) GetMachineInfo() protocol.MachineInfo {
 		Workdir:         c.workdir,
 		Shell:           c.shellName,
 		AvailableShells: c.availableShells,
+		Encoding:        SystemFileEncoding(),
+		ConsoleEncoding: SystemConsoleEncoding(),
 		Version:         ClientVersion,
 		RunningJobs:     c.jobs.RunningCount(),
 	}
@@ -450,14 +452,15 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 
 	case "read":
 		var p struct {
-			Path   string `json:"path"`
-			Offset *int   `json:"offset,omitempty"`
-			Limit  *int   `json:"limit,omitempty"`
+			Path     string `json:"path"`
+			Offset   *int   `json:"offset,omitempty"`
+			Limit    *int   `json:"limit,omitempty"`
+			Encoding string `json:"encoding,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil || strings.TrimSpace(p.Path) == "" {
 			return protocol.RPCResponse{OK: false, Error: "read requires a `path` string"}
 		}
-		content, meta, err := ReadFileOrDir(p.Path, c.GetWorkdir(), p.Offset, p.Limit)
+		content, meta, err := ReadFileOrDirWithEncoding(p.Path, c.GetWorkdir(), p.Offset, p.Limit, p.Encoding)
 		if err != nil {
 			return protocol.RPCResponse{OK: false, Error: err.Error()}
 		}
@@ -465,13 +468,14 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 
 	case "write":
 		var p struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
+			Path     string `json:"path"`
+			Content  string `json:"content"`
+			Encoding string `json:"encoding,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil || strings.TrimSpace(p.Path) == "" {
 			return protocol.RPCResponse{OK: false, Error: "write requires `path` and `content`"}
 		}
-		content, meta, err := WriteFile(p.Path, p.Content, c.GetWorkdir())
+		content, meta, err := WriteFileWithEncoding(p.Path, p.Content, c.GetWorkdir(), p.Encoding)
 		if err != nil {
 			return protocol.RPCResponse{OK: false, Error: err.Error()}
 		}
@@ -483,11 +487,12 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 			OldString  string `json:"oldString"`
 			NewString  string `json:"newString"`
 			ReplaceAll bool   `json:"replaceAll,omitempty"`
+			Encoding   string `json:"encoding,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil || strings.TrimSpace(p.Path) == "" {
 			return protocol.RPCResponse{OK: false, Error: "edit requires `path`, `oldString`, and `newString`"}
 		}
-		content, meta, err := EditFile(p.Path, p.OldString, p.NewString, p.ReplaceAll, c.GetWorkdir())
+		content, meta, err := EditFileWithEncoding(p.Path, p.OldString, p.NewString, p.ReplaceAll, c.GetWorkdir(), p.Encoding)
 		if err != nil {
 			return protocol.RPCResponse{OK: false, Error: err.Error()}
 		}
@@ -517,6 +522,7 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 			Literal       bool   `json:"literal,omitempty"`
 			CaseSensitive *bool  `json:"caseSensitive,omitempty"`
 			Limit         int    `json:"limit,omitempty"`
+			Encoding      string `json:"encoding,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return protocol.RPCResponse{OK: false, Error: "invalid grep arguments"}
@@ -525,7 +531,7 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 		if p.CaseSensitive != nil {
 			caseSens = *p.CaseSensitive
 		}
-		content, meta, err := GrepFiles(c.GetWorkdir(), p.Pattern, p.Path, p.Include, p.Literal, caseSens, p.Limit)
+		content, meta, err := GrepFilesWithEncoding(c.GetWorkdir(), p.Pattern, p.Path, p.Include, p.Literal, caseSens, p.Limit, p.Encoding)
 		if err != nil {
 			return protocol.RPCResponse{OK: false, Error: err.Error()}
 		}
@@ -533,10 +539,11 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 
 	case "shell":
 		var p struct {
-			Command string `json:"command"`
-			Workdir string `json:"workdir,omitempty"`
-			Shell   string `json:"shell,omitempty"`
-			Timeout *int   `json:"timeout,omitempty"`
+			Command  string `json:"command"`
+			Workdir  string `json:"workdir,omitempty"`
+			Shell    string `json:"shell,omitempty"`
+			Timeout  *int   `json:"timeout,omitempty"`
+			Encoding string `json:"encoding,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return protocol.RPCResponse{OK: false, Error: "invalid shell arguments"}
@@ -560,7 +567,7 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 			}
 			shellPath = resolvedShell
 		}
-		content, meta, err := c.jobs.ExecuteShell(p.Command, cwd, shellPath, p.Timeout, c.pushStateUpdate)
+		content, meta, err := c.jobs.ExecuteShellWithEncoding(p.Command, cwd, shellPath, p.Timeout, p.Encoding, c.pushStateUpdate)
 		if err != nil {
 			return protocol.RPCResponse{OK: false, Error: err.Error()}
 		}

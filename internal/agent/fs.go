@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -288,6 +289,10 @@ func formatMissingError(rawInput, absPath string) error {
 }
 
 func ReadFileOrDir(rawPath, workdir string, offsetPtr, limitPtr *int) (string, map[string]any, error) {
+	return ReadFileOrDirWithEncoding(rawPath, workdir, offsetPtr, limitPtr, "")
+}
+
+func ReadFileOrDirWithEncoding(rawPath, workdir string, offsetPtr, limitPtr *int, encodingSpec string) (string, map[string]any, error) {
 	absPath := ResolvePath(rawPath, workdir)
 	displayPath := rawPath
 
@@ -392,53 +397,180 @@ func ReadFileOrDir(rawPath, workdir string, offsetPtr, limitPtr *int) (string, m
 		return "", nil, fmt.Errorf("Unable to read %s: %v", displayPath, readErr)
 	}
 	firstBytes := firstBuf[:nFirst]
+	fullFileInFirst := int64(len(firstBytes)) >= fileSize
 
-	paged := fileSize > MaxReadBytes || offsetPtr != nil || limitPtr != nil
-	if !paged {
-		if bytes.IndexByte(firstBytes, 0) != -1 {
-			return "", nil, fmt.Errorf("Cannot read binary file: %s", displayPath)
+	var encInfo EncodingInfo
+	if strings.TrimSpace(encodingSpec) == "" || strings.EqualFold(strings.TrimSpace(encodingSpec), "auto") {
+		encInfo, err = DetectTextEncoding(firstBytes, fullFileInFirst)
+		if err != nil {
+			if errors.Is(err, errBinaryDetected) {
+				return "", nil, fmt.Errorf("Cannot read binary file: %s", displayPath)
+			}
+			return "", nil, fmt.Errorf("Unable to detect encoding for %s: %v", displayPath, err)
 		}
-		if len(firstBytes) == 0 {
-			return fmt.Sprintf("Read file %s, 0 lines", displayPath), map[string]any{"truncated": false}, nil
+	} else {
+		encInfo, err = ResolveExplicitReadEncoding(encodingSpec, firstBytes)
+		if err != nil {
+			return "", nil, err
 		}
-		text := strings.TrimSuffix(string(firstBytes), "\n")
-		rawLines := strings.Split(text, "\n")
-		out := make([]string, 0, len(rawLines)+1)
-		out = append(out, fmt.Sprintf("Read file %s, lines 1-%d", displayPath, len(rawLines)))
-		for i, l := range rawLines {
-			l = strings.TrimSuffix(l, "\r")
-			out = append(out, fmt.Sprintf("%d: %s", i+1, clampLine(l)))
-		}
-		return strings.Join(out, "\n"), map[string]any{"truncated": false}, nil
 	}
 
 	// If the first chunk already contains the entire file
-	if int64(len(firstBytes)) >= fileSize {
-		res, ok := computeTextPage(firstBytes, true, offset, limit)
+	if fullFileInFirst {
+		decodedStr, decErr := DecodeToUTF8(firstBytes, encInfo)
+		if decErr != nil {
+			return "", nil, fmt.Errorf("Unable to decode %s (%s): %v", displayPath, encInfo.Name, decErr)
+		}
+		decodedBytes := []byte(decodedStr)
+		paged := len(decodedBytes) > MaxReadBytes || offsetPtr != nil || limitPtr != nil
+		if !paged {
+			if len(decodedBytes) == 0 {
+				header := fmt.Sprintf("Read file %s, 0 lines", displayPath)
+				if encInfo.Name != "utf-8" {
+					header += fmt.Sprintf(" (encoding: %s)", encInfo.Name)
+				}
+				return header, map[string]any{"truncated": false, "encoding": encInfo.Name}, nil
+			}
+			text := strings.TrimSuffix(decodedStr, "\n")
+			rawLines := strings.Split(text, "\n")
+			out := make([]string, 0, len(rawLines)+1)
+			header := fmt.Sprintf("Read file %s, lines 1-%d", displayPath, len(rawLines))
+			if encInfo.Name != "utf-8" {
+				header += fmt.Sprintf(" (encoding: %s)", encInfo.Name)
+			}
+			out = append(out, header)
+			for i, l := range rawLines {
+				l = strings.TrimSuffix(l, "\r")
+				out = append(out, fmt.Sprintf("%d: %s", i+1, clampLine(l)))
+			}
+			return strings.Join(out, "\n"), map[string]any{"truncated": false, "encoding": encInfo.Name}, nil
+		}
+
+		res, ok := computeTextPage(decodedBytes, true, offset, limit)
 		if !ok {
 			return "", nil, fmt.Errorf("Unable to read %s", displayPath)
 		}
-		if bytes.IndexByte(firstBytes[:res.consumed], 0) != -1 {
-			return "", nil, fmt.Errorf("Cannot read binary file: %s", displayPath)
-		}
-		leaf := makeTextLeaf(firstBytes)
+		leaf := makeTextLeaf(decodedBytes)
 		var lastByte byte
-		if len(firstBytes) > 0 {
-			lastByte = firstBytes[len(firstBytes)-1]
+		if len(decodedBytes) > 0 {
+			lastByte = decodedBytes[len(decodedBytes)-1]
 		}
-		totalLines := lineCountFromLeaves(leaf.lines, lastByte, len(firstBytes) > 0)
-		return formatTextPageOutput(displayPath, res, totalLines)
+		totalLines := lineCountFromLeaves(leaf.lines, lastByte, len(decodedBytes) > 0)
+		return formatTextPageOutput(displayPath, res, totalLines, encInfo.Name)
 	}
 
-	// Multi-chunk streaming read for large files (256KB chunks on demand)
-	leaves := []textLeaf{makeTextLeaf(firstBytes)}
-	totalBytes := int64(len(firstBytes))
-	totalNewlines := leaves[0].lines
+	// Multi-chunk streaming read for large files (> FirstReadChunk)
+	if encInfo.Enc == nil {
+		// Fast path for UTF-8 / UTF-8-BOM
+		initial := firstBytes
+		if encInfo.HasBOM && len(encInfo.BOM) > 0 && bytes.HasPrefix(initial, encInfo.BOM) {
+			initial = initial[len(encInfo.BOM):]
+		}
+		leaves := []textLeaf{makeTextLeaf(initial)}
+		totalBytes := int64(len(firstBytes))
+		totalNewlines := leaves[0].lines
+		ended := false
+
+		for {
+			eof := ended || totalBytes >= fileSize
+			if totalNewlines >= offset-1 || eof {
+				startByte := findStartByteOffset(leaves, offset-1)
+				var selectedBuf bytes.Buffer
+				pos := 0
+				for _, leaf := range leaves {
+					leafStart := pos
+					pos += len(leaf.bytes)
+					if pos <= startByte {
+						continue
+					}
+					subStart := startByte - leafStart
+					if subStart < 0 {
+						subStart = 0
+					}
+					selectedBuf.Write(leaf.bytes[subStart:])
+				}
+
+				res, ok := computeTextPage(selectedBuf.Bytes(), eof, 1, limit)
+				if ok {
+					res.offset = offset
+					if res.next != nil {
+						nextTranslated := offset + *res.next - 1
+						res.next = &nextTranslated
+					}
+					consumedTotal := startByte + res.consumed
+					checked := 0
+					for _, leaf := range leaves {
+						checkLen := len(leaf.bytes)
+						if consumedTotal-checked < checkLen {
+							checkLen = consumedTotal - checked
+						}
+						checked += len(leaf.bytes)
+						if checkLen > 0 && bytes.IndexByte(leaf.bytes[:checkLen], 0) != -1 {
+							return "", nil, fmt.Errorf("Cannot read binary file: %s", displayPath)
+						}
+						if checked >= consumedTotal {
+							break
+						}
+					}
+					var lastByte byte
+					hasBytes := false
+					if len(leaves) > 0 {
+						lastLeaf := leaves[len(leaves)-1].bytes
+						if len(lastLeaf) > 0 {
+							lastByte = lastLeaf[len(lastLeaf)-1]
+							hasBytes = true
+						}
+					}
+					totalLines := lineCountFromLeaves(totalNewlines, lastByte, hasBytes)
+					return formatTextPageOutput(displayPath, res, totalLines, encInfo.Name)
+				}
+			}
+
+			nextChunk := make([]byte, FirstReadChunk)
+			nNext, nextErr := io.ReadFull(f, nextChunk)
+			if nNext == 0 {
+				ended = true
+				continue
+			}
+			leaf := makeTextLeaf(nextChunk[:nNext])
+			leaves = append(leaves, leaf)
+			totalBytes += int64(nNext)
+			totalNewlines += leaf.lines
+			if nextErr == io.EOF || nextErr == io.ErrUnexpectedEOF {
+				ended = true
+			}
+		}
+	}
+
+	// Streaming decode path for large non-UTF-8 files (GBK, GB18030, UTF-16LE/BE, etc.)
+	rawTail := firstBytes
+	if encInfo.HasBOM && len(encInfo.BOM) > 0 && bytes.HasPrefix(rawTail, encInfo.BOM) {
+		rawTail = rawTail[len(encInfo.BOM):]
+	}
+	utf8Stream := NewUTF8DecodeReader(io.MultiReader(bytes.NewReader(rawTail), f), encInfo)
+	var leaves []textLeaf
+	totalNewlines := 0
 	ended := false
 
 	for {
-		eof := ended || totalBytes >= fileSize
-		if totalNewlines >= offset-1 || eof {
+		nextChunk := make([]byte, FirstReadChunk)
+		nNext, nextErr := io.ReadFull(utf8Stream, nextChunk)
+		if nextErr != nil && nextErr != io.EOF && nextErr != io.ErrUnexpectedEOF {
+			if errors.Is(nextErr, errBinaryDetected) {
+				return "", nil, fmt.Errorf("Cannot read binary file: %s", displayPath)
+			}
+			return "", nil, fmt.Errorf("Unable to decode %s (%s): %v", displayPath, encInfo.Name, nextErr)
+		}
+		if nNext > 0 {
+			leaf := makeTextLeaf(nextChunk[:nNext])
+			leaves = append(leaves, leaf)
+			totalNewlines += leaf.lines
+		}
+		if nNext == 0 || nextErr == io.EOF || nextErr == io.ErrUnexpectedEOF {
+			ended = true
+		}
+
+		if totalNewlines >= offset-1 || ended {
 			startByte := findStartByteOffset(leaves, offset-1)
 			var selectedBuf bytes.Buffer
 			pos := 0
@@ -455,27 +587,12 @@ func ReadFileOrDir(rawPath, workdir string, offsetPtr, limitPtr *int) (string, m
 				selectedBuf.Write(leaf.bytes[subStart:])
 			}
 
-			res, ok := computeTextPage(selectedBuf.Bytes(), eof, 1, limit)
+			res, ok := computeTextPage(selectedBuf.Bytes(), ended, 1, limit)
 			if ok {
 				res.offset = offset
 				if res.next != nil {
 					nextTranslated := offset + *res.next - 1
 					res.next = &nextTranslated
-				}
-				consumedTotal := startByte + res.consumed
-				checked := 0
-				for _, leaf := range leaves {
-					checkLen := len(leaf.bytes)
-					if consumedTotal-checked < checkLen {
-						checkLen = consumedTotal - checked
-					}
-					checked += len(leaf.bytes)
-					if checkLen > 0 && bytes.IndexByte(leaf.bytes[:checkLen], 0) != -1 {
-						return "", nil, fmt.Errorf("Cannot read binary file: %s", displayPath)
-					}
-					if checked >= consumedTotal {
-						break
-					}
 				}
 				var lastByte byte
 				hasBytes := false
@@ -487,27 +604,16 @@ func ReadFileOrDir(rawPath, workdir string, offsetPtr, limitPtr *int) (string, m
 					}
 				}
 				totalLines := lineCountFromLeaves(totalNewlines, lastByte, hasBytes)
-				return formatTextPageOutput(displayPath, res, totalLines)
+				return formatTextPageOutput(displayPath, res, totalLines, encInfo.Name)
 			}
 		}
-
-		nextChunk := make([]byte, FirstReadChunk)
-		nNext, nextErr := io.ReadFull(f, nextChunk)
-		if nNext == 0 {
-			ended = true
-			continue
-		}
-		leaf := makeTextLeaf(nextChunk[:nNext])
-		leaves = append(leaves, leaf)
-		totalBytes += int64(nNext)
-		totalNewlines += leaf.lines
-		if nextErr == io.EOF || nextErr == io.ErrUnexpectedEOF {
-			ended = true
+		if ended {
+			return "", nil, fmt.Errorf("Unable to read %s", displayPath)
 		}
 	}
 }
 
-func formatTextPageOutput(displayPath string, res *pageResult, totalLines int) (string, map[string]any, error) {
+func formatTextPageOutput(displayPath string, res *pageResult, totalLines int, encName string) (string, map[string]any, error) {
 	if len(res.entries) == 0 && res.offset != 1 {
 		word := "lines"
 		if totalLines == 1 {
@@ -517,10 +623,14 @@ func formatTextPageOutput(displayPath string, res *pageResult, totalLines int) (
 	}
 	truncated := res.next != nil
 	var out []string
+	encSuffix := ""
+	if encName != "" && encName != "utf-8" {
+		encSuffix = fmt.Sprintf(" (encoding: %s)", encName)
+	}
 	if len(res.entries) == 0 {
-		out = append(out, fmt.Sprintf("Read file %s, 0 lines", displayPath))
+		out = append(out, fmt.Sprintf("Read file %s, 0 lines%s", displayPath, encSuffix))
 	} else {
-		out = append(out, fmt.Sprintf("Read file %s, lines %d-%d", displayPath, res.offset, res.offset+len(res.entries)-1))
+		out = append(out, fmt.Sprintf("Read file %s, lines %d-%d%s", displayPath, res.offset, res.offset+len(res.entries)-1, encSuffix))
 		for i, line := range res.entries {
 			out = append(out, fmt.Sprintf("%d: %s", res.offset+i, line))
 		}
@@ -528,7 +638,11 @@ func formatTextPageOutput(displayPath string, res *pageResult, totalLines int) (
 	if truncated && res.next != nil {
 		out = append(out, fmt.Sprintf("[Output truncated. Continue reading with offset: %d]", *res.next))
 	}
-	return strings.Join(out, "\n"), map[string]any{"truncated": truncated}, nil
+	meta := map[string]any{"truncated": truncated}
+	if encName != "" {
+		meta["encoding"] = encName
+	}
+	return strings.Join(out, "\n"), meta, nil
 }
 
 func clampLine(s string) string {
@@ -540,6 +654,22 @@ func clampLine(s string) string {
 }
 
 func WriteFile(rawPath, content, workdir string) (string, map[string]any, error) {
+	return WriteFileWithEncoding(rawPath, content, workdir, "")
+}
+
+func WriteFileWithEncoding(rawPath, content, workdir, encodingSpec string) (string, map[string]any, error) {
+	if strings.EqualFold(strings.TrimSpace(encodingSpec), "auto") {
+		return "", nil, fmt.Errorf("write does not support \"auto\" encoding; omit encoding to default to \"utf-8\", or specify an explicit encoding such as \"gbk\", \"gb18030\", \"utf-8-bom\", or \"utf-16le\"")
+	}
+	encInfo, err := LookupEncoding(encodingSpec)
+	if err != nil {
+		return "", nil, err
+	}
+	outBytes, err := EncodeFromUTF8(content, encInfo)
+	if err != nil {
+		return "", nil, fmt.Errorf("Unable to encode %s as %s: %v", rawPath, encInfo.Name, err)
+	}
+
 	absPath := ResolvePath(rawPath, workdir)
 	_, statErr := os.Stat(absPath)
 	existed := statErr == nil
@@ -547,7 +677,7 @@ func WriteFile(rawPath, content, workdir string) (string, map[string]any, error)
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		return "", nil, fmt.Errorf("Unable to create parent directories for %s: %v", rawPath, err)
 	}
-	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(absPath, outBytes, 0644); err != nil {
 		return "", nil, fmt.Errorf("Unable to write %s: %v", rawPath, err)
 	}
 
@@ -555,11 +685,16 @@ func WriteFile(rawPath, content, workdir string) (string, map[string]any, error)
 	if existed {
 		verb = "Wrote"
 	}
-	return fmt.Sprintf("%s file successfully: %s", verb, rawPath), map[string]any{
+	msg := fmt.Sprintf("%s file successfully: %s", verb, rawPath)
+	if encInfo.Name != "utf-8" {
+		msg = fmt.Sprintf("%s file successfully: %s (encoding: %s)", verb, rawPath, encInfo.Name)
+	}
+	return msg, map[string]any{
 		"operation": "write",
 		"target":    absPath,
 		"resource":  rawPath,
 		"existed":   existed,
+		"encoding":  encInfo.Name,
 	}, nil
 }
 
@@ -934,6 +1069,10 @@ func matchView(source, oldString, newString string) ([]byteSpan, func(byteSpan) 
 }
 
 func EditFile(rawPath, oldString, newString string, replaceAll bool, workdir string) (string, map[string]any, error) {
+	return EditFileWithEncoding(rawPath, oldString, newString, replaceAll, workdir, "")
+}
+
+func EditFileWithEncoding(rawPath, oldString, newString string, replaceAll bool, workdir, encodingSpec string) (string, map[string]any, error) {
 	if oldString == newString {
 		return "", nil, fmt.Errorf("No changes to apply: oldString and newString are identical.")
 	}
@@ -957,7 +1096,27 @@ func EditFile(rawPath, oldString, newString string, replaceAll bool, workdir str
 	if err != nil {
 		return "", nil, fmt.Errorf("Unable to edit %s: %v", rawPath, err)
 	}
-	source := string(rawBytes)
+
+	var encInfo EncodingInfo
+	if strings.TrimSpace(encodingSpec) == "" || strings.EqualFold(strings.TrimSpace(encodingSpec), "auto") {
+		encInfo, err = DetectTextEncoding(rawBytes, true)
+		if err != nil {
+			if errors.Is(err, errBinaryDetected) {
+				return "", nil, fmt.Errorf("Cannot edit binary file: %s", rawPath)
+			}
+			return "", nil, fmt.Errorf("Unable to detect encoding for %s: %v", rawPath, err)
+		}
+	} else {
+		encInfo, err = ResolveExplicitReadEncoding(encodingSpec, rawBytes)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
+	source, err := DecodeToUTF8(rawBytes, encInfo)
+	if err != nil {
+		return "", nil, fmt.Errorf("Unable to decode %s (%s): %v", rawPath, encInfo.Name, err)
+	}
 
 	endingsOnly := strings.ReplaceAll(oldString, "\r", "") == strings.ReplaceAll(newString, "\r", "")
 	var matches []byteSpan
@@ -1005,7 +1164,12 @@ func EditFile(rawPath, oldString, newString string, replaceAll bool, workdir str
 		return "", nil, fmt.Errorf("No changes to apply: the edit leaves %s unchanged. Line endings follow the file; to change them, write \\r explicitly in oldString or newString.", rawPath)
 	}
 
-	if err := os.WriteFile(absPath, []byte(replaced), st.Mode().Perm()); err != nil {
+	outBytes, err := EncodeFromUTF8(replaced, encInfo)
+	if err != nil {
+		return "", nil, fmt.Errorf("Unable to save %s in original encoding (%s): %v", rawPath, encInfo.Name, err)
+	}
+
+	if err := os.WriteFile(absPath, outBytes, st.Mode().Perm()); err != nil {
 		return "", nil, fmt.Errorf("Unable to write edited file %s: %v", rawPath, err)
 	}
 
@@ -1014,8 +1178,13 @@ func EditFile(rawPath, oldString, newString string, replaceAll bool, workdir str
 	if count == 1 {
 		plural = ""
 	}
-	return fmt.Sprintf("Edited %s (%d replacement%s)", rawPath, count, plural), map[string]any{
+	msg := fmt.Sprintf("Edited %s (%d replacement%s)", rawPath, count, plural)
+	if encInfo.Name != "utf-8" {
+		msg = fmt.Sprintf("Edited %s (%d replacement%s, encoding: %s)", rawPath, count, plural, encInfo.Name)
+	}
+	return msg, map[string]any{
 		"replacements": count,
+		"encoding":     encInfo.Name,
 	}, nil
 }
 
@@ -1195,8 +1364,18 @@ func GlobFiles(workdir, pattern, searchPath string, hidden bool, limit int) (str
 }
 
 func GrepFiles(workdir, pattern, searchPath, include string, literal, caseSensitive bool, limit int) (string, map[string]any, error) {
+	return GrepFilesWithEncoding(workdir, pattern, searchPath, include, literal, caseSensitive, limit, "")
+}
+
+func GrepFilesWithEncoding(workdir, pattern, searchPath, include string, literal, caseSensitive bool, limit int, encodingSpec string) (string, map[string]any, error) {
 	if pattern == "" {
 		return "", nil, fmt.Errorf("Pattern must not be empty")
+	}
+	explicitEnc := strings.TrimSpace(encodingSpec) != "" && !strings.EqualFold(strings.TrimSpace(encodingSpec), "auto")
+	if explicitEnc {
+		if _, err := LookupEncoding(encodingSpec); err != nil {
+			return "", nil, err
+		}
 	}
 	if limit <= 0 {
 		limit = DefaultSearchLimit
@@ -1250,17 +1429,33 @@ func GrepFiles(workdir, pattern, searchPath, include string, literal, caseSensit
 		defer f.Close()
 
 		br := bufio.NewReaderSize(f, 32*1024)
-		peekBytes, _ := br.Peek(8192)
+		peekBytes, peekErr := br.Peek(8192)
 		if len(peekBytes) == 0 {
 			return
 		}
-		if bytes.IndexByte(peekBytes, 0) != -1 {
-			return
+
+		var encInfo EncodingInfo
+		if explicitEnc {
+			encInfo, err = ResolveExplicitReadEncoding(encodingSpec, peekBytes)
+			if err != nil {
+				return
+			}
+		} else {
+			encInfo, err = DetectTextEncoding(peekBytes, peekErr == io.EOF)
+			if err != nil {
+				return
+			}
 		}
+
+		if encInfo.HasBOM && len(encInfo.BOM) > 0 && bytes.HasPrefix(peekBytes, encInfo.BOM) {
+			_, _ = br.Discard(len(encInfo.BOM))
+		}
+
+		lineBr := bufio.NewReaderSize(NewUTF8DecodeReader(br, encInfo), 32*1024)
 
 		lineNum := 0
 		for {
-			rawLine, readErr := br.ReadString('\n')
+			rawLine, readErr := lineBr.ReadString('\n')
 			if len(rawLine) > 0 {
 				lineNum++
 				line := strings.TrimSuffix(rawLine, "\n")

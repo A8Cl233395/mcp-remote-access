@@ -220,8 +220,15 @@ func (s *Session) ListMachinesFormatted() (string, map[string]any, error) {
 		if m.IsAdmin {
 			adminTag = " [admin/root]"
 		}
+		encTag := ""
+		if m.Encoding != "" {
+			encTag = fmt.Sprintf("  enc=%s", m.Encoding)
+			if m.ConsoleEncoding != "" && m.ConsoleEncoding != m.Encoding {
+				encTag += fmt.Sprintf("/%s", m.ConsoleEncoding)
+			}
+		}
 		lines = append(lines, fmt.Sprintf(
-			" %s %s  (%s/%s)  host=%s  user=%s%s  shell=%s (avail: %s)  workdir=%s  jobs=%d",
+			" %s %s  (%s/%s)  host=%s  user=%s%s  shell=%s (avail: %s)%s  workdir=%s  jobs=%d",
 			marker,
 			m.MachineID,
 			m.OS,
@@ -231,6 +238,7 @@ func (s *Session) ListMachinesFormatted() (string, map[string]any, error) {
 			adminTag,
 			m.Shell,
 			strings.Join(m.AvailableShells, ","),
+			encTag,
 			m.Workdir,
 			m.RunningJobs,
 		))
@@ -266,6 +274,13 @@ func (s *Session) SwitchMachine(targetID string) (string, map[string]any, error)
 	if m.IsAdmin {
 		adminStr = "yes"
 	}
+	encStr := m.Encoding
+	if encStr == "" {
+		encStr = "utf-8"
+	}
+	if m.ConsoleEncoding != "" && m.ConsoleEncoding != encStr {
+		encStr = fmt.Sprintf("%s (console: %s)", encStr, m.ConsoleEncoding)
+	}
 	summary := strings.Join([]string{
 		fmt.Sprintf("Switched active machine to: %s", m.MachineID),
 		fmt.Sprintf("  Hostname:         %s", m.Hostname),
@@ -274,6 +289,7 @@ func (s *Session) SwitchMachine(targetID string) (string, map[string]any, error)
 		fmt.Sprintf("  Workdir:          %s", m.Workdir),
 		fmt.Sprintf("  Current Shell:    %s", m.Shell),
 		fmt.Sprintf("  Available Shells: %s", strings.Join(m.AvailableShells, ", ")),
+		fmt.Sprintf("  System Encoding:  %s", encStr),
 		fmt.Sprintf("  Running Jobs:     %d", m.RunningJobs),
 	}, "\n")
 

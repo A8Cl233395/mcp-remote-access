@@ -94,14 +94,6 @@ func (r *JobRecord) writeOutput(p []byte) (int, error) {
 	return len(p), nil
 }
 
-type jobOutputWriter struct {
-	rec *JobRecord
-}
-
-func (w jobOutputWriter) Write(p []byte) (int, error) {
-	return w.rec.writeOutput(p)
-}
-
 type JobRegistry struct {
 	mu      sync.Mutex
 	records map[string]*JobRecord
@@ -134,8 +126,15 @@ func (reg *JobRegistry) RunningCount() int {
 }
 
 func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeoutMs *int, onStateChange func()) (string, map[string]any, error) {
+	return reg.ExecuteShellWithEncoding(command, workdir, shellPath, timeoutMs, "", onStateChange)
+}
+
+func (reg *JobRegistry) ExecuteShellWithEncoding(command, workdir, shellPath string, timeoutMs *int, encodingSpec string, onStateChange func()) (string, map[string]any, error) {
 	if strings.TrimSpace(command) == "" {
 		return "", nil, fmt.Errorf("The shell tool was called with invalid arguments: `command` must be a non-empty string.")
+	}
+	if err := ValidateShellEncoding(encodingSpec); err != nil {
+		return "", nil, fmt.Errorf("The shell tool was called with invalid arguments: %v", err)
 	}
 	if reg.RunningCount() >= MaxJobs {
 		return "", nil, fmt.Errorf("Background job limit reached (%d/%d). Run job_list and job_kill one of the running jobs first.", MaxJobs, MaxJobs)
@@ -171,12 +170,15 @@ func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeout
 	}
 
 	cmd := BuildShellCommand(shellPath, command, workdir)
-	writer := jobOutputWriter{rec: rec}
-	cmd.Stdout = writer
-	cmd.Stderr = writer
+	stdoutWriter := newShellStreamWriter(rec, encodingSpec)
+	stderrWriter := newShellStreamWriter(rec, encodingSpec)
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	rec.cmd = cmd
 
 	if err := cmd.Start(); err != nil {
+		stdoutWriter.Close()
+		stderrWriter.Close()
 		nowEnd := time.Now()
 		exitCode := 1
 		rec.SpawnError = err.Error()
@@ -196,6 +198,8 @@ func (reg *JobRegistry) ExecuteShell(command, workdir, shellPath string, timeout
 
 	go func() {
 		err := cmd.Wait()
+		stdoutWriter.Close()
+		stderrWriter.Close()
 		time.Sleep(ExitSettleMs * time.Millisecond)
 
 		reg.mu.Lock()

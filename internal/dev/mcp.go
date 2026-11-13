@@ -308,7 +308,7 @@ func ToolDefinitions() []MCPToolDefinition {
 		},
 		{
 			Name:        "read",
-			Description: "Read the contents of a file or directory on the remote machine. Each text line is prefixed by its 1-based line number as <line>: <content>. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections.",
+			Description: "Read the contents of a file or directory on the remote machine. Each text line is prefixed by its 1-based line number as <line>: <content>. Automatically detects UTF-8, UTF-8-BOM, UTF-16LE/BE, and system encodings (e.g. GBK/GB18030, Big5, Shift-JIS, EUC-KR, Windows-1252). Directory entries are returned one per line. Use offset and limit to read large files or directories in sections.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -326,13 +326,17 @@ func ToolDefinitions() []MCPToolDefinition {
 						"minimum":     0,
 						"description": "The maximum number of lines or directory entries to read (defaults to and capped at 2000).",
 					},
+					"encoding": map[string]any{
+						"type":        "string",
+						"description": "Optional text encoding override (default: \"auto\"). Examples: \"auto\", \"utf-8\", \"gbk\", \"gb18030\", \"big5\", \"shift_jis\", \"euc-kr\", \"utf-16le\", \"utf-16be\", \"windows-1252\".",
+					},
 				},
 				"required": []string{"path"},
 			},
 		},
 		{
 			Name:        "write",
-			Description: "Writes a file to the remote machine's filesystem, overwriting if one exists. Missing parent directories are created automatically.",
+			Description: "Writes a file to the remote machine's filesystem, overwriting if one exists. Missing parent directories are created automatically. Defaults to UTF-8 unless an explicit encoding is specified.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -344,13 +348,17 @@ func ToolDefinitions() []MCPToolDefinition {
 						"type":        "string",
 						"description": "Content to write to the file.",
 					},
+					"encoding": map[string]any{
+						"type":        "string",
+						"description": "Optional output encoding (default: \"utf-8\"; \"auto\" is not allowed). Examples: \"utf-8\", \"utf-8-bom\", \"gbk\", \"gb18030\", \"big5\", \"shift_jis\", \"euc-kr\", \"utf-16le\", \"utf-16be\", \"windows-1252\".",
+					},
 				},
 				"required": []string{"path", "content"},
 			},
 		},
 		{
 			Name:        "edit",
-			Description: "Edit the contents of a file on the remote machine by finding and replacing exact text. Omit line-number prefixes from Read output. Preserves existing CRLF or LF line endings. Retries ignoring typographic quote/dash/space variants and trailing whitespace if exact match misses.",
+			Description: "Edit the contents of a file on the remote machine by finding and replacing exact text. Omit line-number prefixes from Read output. Preserves existing encoding, BOM, and CRLF/LF line endings. Retries ignoring typographic quote/dash/space variants and trailing whitespace if exact match misses.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -369,6 +377,10 @@ func ToolDefinitions() []MCPToolDefinition {
 					"replaceAll": map[string]any{
 						"type":        "boolean",
 						"description": "Whether to replace every occurrence of oldString. Defaults to false.",
+					},
+					"encoding": map[string]any{
+						"type":        "string",
+						"description": "Optional text encoding override (default: \"auto\", which detects and preserves the file's original encoding).",
 					},
 				},
 				"required": []string{"path", "oldString", "newString"},
@@ -402,7 +414,7 @@ func ToolDefinitions() []MCPToolDefinition {
 		},
 		{
 			Name:        "grep",
-			Description: "Search file contents on the remote machine using regular expression syntax or literal text matching. Returns matching file paths, line numbers, and line previews.",
+			Description: "Search file contents on the remote machine using regular expression syntax or literal text matching. Automatically detects file encodings (UTF-8, UTF-16LE/BE, GBK/GB18030, etc.). Returns matching file paths, line numbers, and line previews.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -430,13 +442,17 @@ func ToolDefinitions() []MCPToolDefinition {
 						"type":        "integer",
 						"description": "Maximum number of matching lines to return (default: 100).",
 					},
+					"encoding": map[string]any{
+						"type":        "string",
+						"description": "Optional text encoding override (default: \"auto\").",
+					},
 				},
 				"required": []string{"pattern"},
 			},
 		},
 		{
 			Name:        "shell",
-			Description: "Execute a shell command on the remote machine and return its output. Commands accept an optional timeout; a command that does not finish within 30 seconds is moved to a background job. Set timeout to 0 to start in the background and wait once for its first output (up to 3000 ms). Background jobs survive network reconnects; read them with job_read and stop them with job_kill.",
+			Description: "Execute a shell command on the remote machine and return its output (automatically decoding non-UTF-8 console output such as Windows GBK/CP936 to UTF-8). Commands accept an optional timeout; a command that does not finish within 30 seconds is moved to a background job. Set timeout to 0 to start in the background and wait once for its first output (up to 3000 ms). Background jobs survive network reconnects; read them with job_read and stop them with job_kill.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -457,6 +473,10 @@ func ToolDefinitions() []MCPToolDefinition {
 						"minimum":     0,
 						"maximum":     900000,
 						"description": "Timeout in milliseconds. Set to 0 to start in the background and wait once for its first output (up to 3000 ms). Defaults to 30000 ms.",
+					},
+					"encoding": map[string]any{
+						"type":        "string",
+						"description": "Optional stdout/stderr encoding override (default: \"auto\", which detects UTF-8 vs the target console codepage).",
 					},
 				},
 				"required": []string{"command"},

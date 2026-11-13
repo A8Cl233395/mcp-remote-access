@@ -262,6 +262,43 @@ func TestEndToEndAllToolsAndAutoUpdate(t *testing.T) {
 		t.Fatalf("grep failed: %s", txt)
 	}
 
+	// Non-UTF-8 (GBK) MCP round-trip: write(gbk) -> read(auto) -> edit(preserve gbk) -> grep -> write(auto rejected)
+	txt, isErr = callTool("write", map[string]any{
+		"path":     "notes/gbk.txt",
+		"content":  "第一行：远程中文配置\r\n第二行：目录状态\r\n",
+		"encoding": "gbk",
+	})
+	if isErr || !strings.Contains(txt, "encoding: gbk") {
+		t.Fatalf("write gbk failed (isErr=%v): %s", isErr, txt)
+	}
+	txt, isErr = callTool("read", map[string]any{"path": "notes/gbk.txt"})
+	if isErr || !strings.Contains(txt, "(encoding: gbk)") || !strings.Contains(txt, "1: 第一行：远程中文配置") || !strings.Contains(txt, "2: 第二行：目录状态") {
+		t.Fatalf("read gbk failed (isErr=%v): %s", isErr, txt)
+	}
+	txt, isErr = callTool("edit", map[string]any{
+		"path":      "notes/gbk.txt",
+		"oldString": "第二行：目录状态",
+		"newString": "第二行：运行正常",
+	})
+	if isErr || !strings.Contains(txt, "encoding: gbk") {
+		t.Fatalf("edit gbk failed (isErr=%v): %s", isErr, txt)
+	}
+	txt, isErr = callTool("grep", map[string]any{
+		"pattern": "运行正常",
+		"path":    "notes",
+	})
+	if isErr || !strings.Contains(txt, "Found 1 matches") || !strings.Contains(txt, "gbk.txt") {
+		t.Fatalf("grep gbk failed (isErr=%v): %s", isErr, txt)
+	}
+	txt, isErr = callTool("write", map[string]any{
+		"path":     "notes/reject.txt",
+		"content":  "hello",
+		"encoding": "auto",
+	})
+	if !isErr || !strings.Contains(txt, "auto") {
+		t.Fatalf("expected write with encoding=auto to fail, got isErr=%v txt=%s", isErr, txt)
+	}
+
 	// Tool 9: shell (foreground execution)
 	txt, isErr = callTool("shell", map[string]any{
 		"command": "echo mcp-shell-ok",

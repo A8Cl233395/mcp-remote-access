@@ -62,6 +62,8 @@ type MachineInfo struct {
 	Workdir         string   `json:"workdir"`
 	Shell           string   `json:"shell"`
 	AvailableShells []string `json:"available_shells"`
+	Encoding        string   `json:"encoding,omitempty"`
+	ConsoleEncoding string   `json:"console_encoding,omitempty"`
 	Version         string   `json:"version"`
 	ConnectedAt     int64    `json:"connected_at"`
 	RunningJobs     int      `json:"running_jobs,omitempty"`
