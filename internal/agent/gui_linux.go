@@ -22,17 +22,20 @@ const linuxGUIHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <title>MCP Remote Access - User Client</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #f4f5f7; margin: 0; padding: 24px; color: #1f2937; }
-  .card { max-width: 400px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
-  h3 { margin-top: 0; margin-bottom: 16px; }
-  label { display: block; font-size: 13px; margin-bottom: 4px; font-weight: 600; }
-  input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 12px; border: 1px solid #d1d5db; border-radius: 4px; }
-  button { background: #2563eb; color: #fff; border: none; padding: 9px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f1f5f9; margin: 0; padding: 32px 16px; color: #0f172a; }
+  .card { max-width: 400px; margin: 0 auto; background: #fff; padding: 24px; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 4px 12px rgba(15,23,42,0.06); }
+  h3 { margin: 0 0 4px 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+  .sub { font-size: 12px; color: #64748b; margin-bottom: 18px; }
+  label { display: block; font-size: 13px; margin-bottom: 6px; font-weight: 600; color: #334155; }
+  input[type="text"] { width: 100%; box-sizing: border-box; padding: 9px 11px; margin-bottom: 14px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; color: #0f172a; transition: border-color .15s, box-shadow .15s; }
+  input[type="text"]:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.15); }
+  button { background: #2563eb; color: #fff; border: none; padding: 9px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: background .15s; }
   button:hover { background: #1d4ed8; }
-  .btn-exit { background: #dc2626; }
-  .btn-exit:hover { background: #b91c1c; }
-  .status { margin-top: 16px; padding: 10px; background: #f3f4f6; border-radius: 4px; font-size: 13px; word-break: break-all; }
-  .status.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+  .btn-exit { background: #f1f5f9; color: #b91c1c; border: 1px solid #fecaca; }
+  .btn-exit:hover { background: #fef2f2; }
+  .status { margin-top: 16px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; line-height: 1.45; color: #334155; word-break: break-word; }
+  .status.ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+  .status.error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
   .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); align-items: center; justify-content: center; z-index: 1000; padding: 16px; }
   .modal-backdrop.open { display: flex; }
   .modal { max-width: 380px; width: 100%; background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); border-top: 4px solid #dc2626; }
@@ -45,11 +48,12 @@ const linuxGUIHTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <h3>MCP Remote Access Client</h3>
+  <h3>MCP Remote Access</h3>
+  <div class="sub">Remote Agent Control Panel</div>
   <label for="key">Connection Key</label>
-  <input id="key" type="text" />
-  <div style="margin-bottom: 14px;">
-    <label style="display: inline-flex; align-items: center; font-size: 13px; font-weight: normal; cursor: pointer; user-select: none;">
+  <input id="key" type="text" placeholder="Enter user connection key..." onkeydown="if(event.key==='Enter')connectNow()" />
+  <div style="margin-bottom: 16px;">
+    <label style="display: inline-flex; align-items: center; font-size: 13px; font-weight: normal; cursor: pointer; user-select: none; margin: 0;">
       <input id="saveFile" type="checkbox" style="width: auto; margin: 0 8px 0 0; cursor: pointer;" />
       Save Login State
     </label>
@@ -100,11 +104,7 @@ async function loadState() {
     }
     const statusEl = document.getElementById('status');
     statusEl.innerText = 'Status: ' + d.status;
-    if (d.error) {
-      statusEl.classList.add('error');
-    } else {
-      statusEl.classList.remove('error');
-    }
+    statusEl.className = 'status' + (d.error ? ' error' : (d.status && d.status.indexOf('Connected') === 0 ? ' ok' : ''));
     if (d.error && d.errorSeq && d.errorSeq > lastShownErrorSeq) {
       lastShownErrorSeq = d.errorSeq;
       showErrorModal(d.error);

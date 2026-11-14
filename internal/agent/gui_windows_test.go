@@ -56,3 +56,52 @@ func TestUpdateGUIStatusNonBlocking(t *testing.T) {
 		t.Fatal("updateGUIStatus blocked when UI thread was not pumping messages")
 	}
 }
+
+func TestGUILayoutAndStatusStyling(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	enableVisualStyles()
+	hbrBg, _, _ = procCreateSolidBrush.Call(rgb(248, 250, 252))
+	hbrStatIdle, _, _ = procCreateSolidBrush.Call(rgb(241, 245, 249))
+	hbrStatOk, _, _ = procCreateSolidBrush.Call(rgb(240, 253, 244))
+	hbrStatErr, _, _ = procCreateSolidBrush.Call(rgb(254, 242, 242))
+
+	hInst, _, _ := procGetModuleHandleW.Call(0)
+	className, _ := syscall.UTF16PtrFromString("MCPRemoteUserClientTestWnd")
+	wc := wndClassExW{
+		cbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
+		lpfnWndProc:   syscall.NewCallback(wndProc),
+		hInstance:     syscall.Handle(hInst),
+		hbrBackground: syscall.Handle(hbrBg),
+		lpszClassName: className,
+	}
+	_, _, _ = procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+
+	title, _ := syscall.UTF16PtrFromString("Test")
+	h, _, _ := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(title)),
+		wsOverlappedDialog,
+		0, 0, 440, 282,
+		0, 0, hInst, 0,
+	)
+	if h == 0 {
+		t.Fatal("failed to create test GUI window")
+	}
+	defer procDestroyWindowTest.Call(h)
+
+	if hwndKeyEdit == 0 || hwndBtnConnect == 0 || hwndStatus == 0 || hwndStatusBox == 0 {
+		t.Fatal("expected all GUI controls to be created in wmCreate")
+	}
+
+	latestStatus = "Status: Connected as test-pc"
+	if br := wndProc(syscall.Handle(h), wmCtlColorStatic, 0, uintptr(hwndStatus)); br != hbrStatOk {
+		t.Fatalf("expected connected status brush %x, got %x", hbrStatOk, br)
+	}
+	latestStatus = "Status: Error: auth failed"
+	if br := wndProc(syscall.Handle(h), wmCtlColorStatic, 0, uintptr(hwndStatusBox)); br != hbrStatErr {
+		t.Fatalf("expected error status brush %x, got %x", hbrStatErr, br)
+	}
+}
