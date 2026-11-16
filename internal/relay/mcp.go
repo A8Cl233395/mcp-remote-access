@@ -372,8 +372,10 @@ func (s *Server) handleMCPSSE(w http.ResponseWriter, r *http.Request) {
 	s.mcpSessions[sessID] = sess
 	s.mcpMu.Unlock()
 
+	s.cfg.Logger.Printf("mcp sse connected: session=%s remote=%s", sessID, r.RemoteAddr)
 	defer func() {
 		s.deleteMCPSession(sessID)
+		s.cfg.Logger.Printf("mcp sse disconnected: session=%s", sessID)
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")

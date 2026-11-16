@@ -101,6 +101,10 @@ func NewServer(cfg Config) *Server {
 	}
 }
 
+func (s *Server) Logger() *log.Logger {
+	return s.cfg.Logger
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
@@ -125,7 +129,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/oauth/authorize", s.withCORS(s.handleOAuthAuthorize))
 		mux.HandleFunc("/oauth/token", s.withCORS(s.handleOAuthToken))
 	}
-	return mux
+	return s.withHTTPLogging(mux)
 }
 
 func (s *Server) checkUserAuth(r *http.Request) bool {

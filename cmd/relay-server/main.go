@@ -55,8 +55,9 @@ func main() {
 	}
 
 	httpSrv := &http.Server{
-		Addr:    *addr,
-		Handler: srv.Handler(),
+		Addr:     *addr,
+		Handler:  srv.Handler(),
+		ErrorLog: srv.Logger(),
 	}
 	if err := httpSrv.Serve(listener); err != nil {
 		log.Fatalf("[relay-server] exited: %v", err)
