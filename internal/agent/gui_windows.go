@@ -86,6 +86,7 @@ const (
 
 	bmGetCheck   = 0x00F0
 	bmSetCheck   = 0x00F1
+	bnClicked    = 0
 	bstUnchecked = 0
 	bstChecked   = 1
 	emSetMargins = 0x00D3
@@ -394,11 +395,21 @@ func wndProc(hwnd syscall.Handle, message uint32, wParam, lParam uintptr) uintpt
 
 	case wmCommand:
 		id := wParam & 0xFFFF
-		if id == idBtnConnect {
+		notifyCode := (wParam >> 16) & 0xFFFF
+		switch id {
+		case idBtnConnect:
 			key := getWindowText(hwndKeyEdit)
 			checkState, _, _ := procSendMessageW.Call(uintptr(hwndSaveFileChk), bmGetCheck, 0, 0)
 			saveFile := checkState == bstChecked
 			startOrRestartAgent(key, saveFile)
+			return 0
+		case idCheckSaveFile:
+			if notifyCode == bnClicked {
+				checkState, _, _ := procSendMessageW.Call(uintptr(hwndSaveFileChk), bmGetCheck, 0, 0)
+				if checkState != bstChecked {
+					_ = RemoveConfigFile()
+				}
+			}
 			return 0
 		}
 

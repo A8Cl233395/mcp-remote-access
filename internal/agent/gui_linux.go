@@ -87,8 +87,17 @@ function closeErrorModal() {
   document.getElementById('errorModal').classList.remove('open');
 }
 
-document.getElementById('saveFile').addEventListener('change', function() {
+document.getElementById('saveFile').addEventListener('change', async function() {
   userChangedSaveFile = true;
+  if (!this.checked && !isExiting) {
+    try {
+      await fetch('/api/save-file', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ saveFile: false })
+      });
+    } catch(e) {}
+  }
 });
 
 async function loadState() {
@@ -370,6 +379,22 @@ func RunGUI(opts ClientOptions) error {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		startAgent(body.Key, body.SaveFile)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("/api/save-file", func(w http.ResponseWriter, r *http.Request) {
+		touchHeartbeat()
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SaveFile bool `json:"saveFile"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !body.SaveFile {
+			_ = RemoveConfigFile()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
