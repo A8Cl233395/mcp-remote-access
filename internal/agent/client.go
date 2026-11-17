@@ -460,6 +460,12 @@ func classifyUpdateError(err error) error {
 	if err == nil {
 		return nil
 	}
+	if isReadOnlyOrPermissionError(err) {
+		return &FatalError{
+			Reason: "cannot apply update because the executable directory is read-only or not writable; please copy the client to a writable local directory and run it again",
+			Err:    err,
+		}
+	}
 	if isConnectionRefusedError(err) {
 		return &FatalError{Reason: "connection actively refused by remote server", Err: err}
 	}
@@ -552,6 +558,26 @@ func isConnectionRefusedError(err error) bool {
 	}
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused")
+}
+
+func isReadOnlyOrPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		// ERROR_ACCESS_DENIED (5), ERROR_WRITE_PROTECT (19)
+		if errors.Is(err, syscall.Errno(5)) || errors.Is(err, syscall.Errno(19)) {
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "read-only file system") ||
+		strings.Contains(lower, "write protected") ||
+		strings.Contains(lower, "access is denied") ||
+		strings.Contains(lower, "permission denied")
 }
 
 func isTLSError(err error) bool {

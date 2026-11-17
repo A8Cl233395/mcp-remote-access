@@ -103,7 +103,11 @@ func BuildShellCommand(shellPath, command, workdir string) *exec.Cmd {
 	var cmd *exec.Cmd
 	switch name {
 	case "pwsh", "powershell":
-		cmd = exec.Command(shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
+		psCommand := command
+		if runtime.GOOS == "windows" && strings.TrimSpace(command) != "" {
+			psCommand = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; [Console]::InputEncoding = $utf8; $OutputEncoding = $utf8; " + command
+		}
+		cmd = exec.Command(shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", psCommand)
 	case "cmd":
 		cmd = buildCmdExe(shellPath, command)
 	default:

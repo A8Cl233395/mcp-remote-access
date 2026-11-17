@@ -2,13 +2,19 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -278,5 +284,109 @@ func TestUDPReverseListenExitDeadlock(t *testing.T) {
 	case <-doneCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("handleUDPReverseListenStream deadlocked on exit with active UDP session")
+	}
+}
+
+func TestClassifyUpdateErrorReadOnlyAndPermission(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		wantFatal bool
+	}{
+		{
+			name:      "os.ErrPermission wrapped",
+			err:       fmt.Errorf("create update file failed: %w", &os.PathError{Op: "open", Path: "user-client.exe.new", Err: os.ErrPermission}),
+			wantFatal: true,
+		},
+		{
+			name:      "EACCES",
+			err:       fmt.Errorf("rename running binary to .old failed: %w", syscall.EACCES),
+			wantFatal: true,
+		},
+		{
+			name:      "write protected message",
+			err:       errors.New("create update file E:\\user-client.exe.new failed: The media is write protected."),
+			wantFatal: true,
+		},
+		{
+			name:      "read-only file system message",
+			err:       errors.New("create update file /mnt/usb/user-client.new failed: read-only file system"),
+			wantFatal: true,
+		},
+		{
+			name:      "transient timeout",
+			err:       context.DeadlineExceeded,
+			wantFatal: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyUpdateError(tc.err)
+			if tc.wantFatal {
+				if !IsFatalError(got) {
+					t.Fatalf("expected FatalError for %v, got %v", tc.err, got)
+				}
+			} else if got != nil {
+				t.Fatalf("expected nil (non-fatal) for %v, got %v", tc.err, got)
+			}
+		})
+	}
+}
+
+func TestCheckAndDownloadUpdateStatusStages(t *testing.T) {
+	newPayload := []byte("new-binary-content")
+	sum := sha256.Sum256(newPayload)
+	newSHA := hex.EncodeToString(sum[:])
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/update/manifest":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(protocol.UpdateManifest{
+				Available: true,
+				SHA256:    newSHA,
+				Size:      int64(len(newPayload)),
+			})
+		case "/update/binary":
+			_, _ = w.Write(newPayload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	exePath := filepath.Join(t.TempDir(), "user-client.exe")
+	if err := os.WriteFile(exePath, []byte("old-binary"), 0755); err != nil {
+		t.Fatalf("write old exe: %v", err)
+	}
+
+	var statuses []string
+	updated, err := checkAndDownloadUpdateWithStatus(srv.URL, "k", exePath, runtime.GOOS, runtime.GOARCH, true, func(st string) {
+		statuses = append(statuses, st)
+	})
+	if err != nil {
+		t.Fatalf("checkAndDownloadUpdateWithStatus failed: %v", err)
+	}
+	if !updated {
+		t.Fatal("expected updated=true")
+	}
+	if len(statuses) != 2 || statuses[0] != "Checking for updates..." || statuses[1] != "Downloading update..." {
+		t.Fatalf("unexpected statuses when update available: %v", statuses)
+	}
+
+	// Second call with matching SHA256 should only emit "Checking for updates..."
+	statuses = nil
+	updated, err = checkAndDownloadUpdateWithStatus(srv.URL, "k", exePath, runtime.GOOS, runtime.GOARCH, true, func(st string) {
+		statuses = append(statuses, st)
+	})
+	if err != nil {
+		t.Fatalf("second checkAndDownloadUpdateWithStatus failed: %v", err)
+	}
+	if updated {
+		t.Fatal("expected updated=false when already on latest SHA256")
+	}
+	if len(statuses) != 1 || statuses[0] != "Checking for updates..." {
+		t.Fatalf("unexpected statuses when up-to-date: %v", statuses)
 	}
 }

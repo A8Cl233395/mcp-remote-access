@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/saintfish/chardet"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/japanese"
@@ -297,7 +298,13 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 		return EncodingInfo{Name: "utf-8"}, nil
 	}
 
-	// 4. Non-UTF-8 text: build ordered candidate list starting with OS file encoding.
+	// 4. Non-UTF-8 text: try statistical detection (chardet) validated by clean decoding.
+	if info, ok := detectEncodingWithChardet(sample, isEOF, 50, false); ok {
+		return info, nil
+	}
+
+	// 5. Fallback ordered candidate list: CJK multi-byte encodings before single-byte encodings
+	// so single-byte codepages (e.g. windows-1252) do not preempt CJK encodings.
 	var candidates []string
 	seen := make(map[string]bool)
 	addCand := func(name string) {
@@ -309,9 +316,11 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 	}
 
 	sysEnc := SystemFileEncoding()
-	addCand(sysEnc)
-	if sysEnc == "gbk" {
-		addCand("gb18030")
+	if sysInfo, err := LookupEncoding(sysEnc); err == nil && sysInfo.IsCJK {
+		addCand(sysEnc)
+		if sysEnc == "gbk" {
+			addCand("gb18030")
+		}
 	}
 	// Common multi-byte CJK encodings before single-byte encodings
 	addCand("gbk")
@@ -320,6 +329,7 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 	addCand("shift_jis")
 	addCand("euc-kr")
 	addCand("euc-jp")
+	addCand(sysEnc)
 	addCand("windows-1252")
 
 	for _, name := range candidates {
@@ -339,6 +349,40 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 		}
 	}
 	return LookupEncoding("windows-1252")
+}
+
+func detectEncodingWithChardet(sample []byte, isEOF bool, minConfidence int, cjkOnly bool) (EncodingInfo, bool) {
+	results, err := chardet.NewTextDetector().DetectAll(sample)
+	if err != nil {
+		return EncodingInfo{}, false
+	}
+	for _, r := range results {
+		if r.Confidence < minConfidence {
+			continue
+		}
+		var tryNames []string
+		switch strings.ToLower(strings.TrimSpace(r.Charset)) {
+		case "gb-18030", "gb18030", "gbk", "gb2312":
+			tryNames = []string{"gbk", "gb18030"}
+		case "iso-8859-1":
+			tryNames = []string{"windows-1252", "iso-8859-1"}
+		default:
+			tryNames = []string{r.Charset}
+		}
+		for _, name := range tryNames {
+			info, err := LookupEncoding(name)
+			if err != nil || info.Enc == nil {
+				continue
+			}
+			if cjkOnly && !info.IsCJK {
+				continue
+			}
+			if canDecodeCleanly(sample, info, isEOF) {
+				return info, true
+			}
+		}
+	}
+	return EncodingInfo{}, false
 }
 
 // DecodeToUTF8 decodes raw file bytes (stripping BOM if enc.HasBOM) into a UTF-8 string.
@@ -601,6 +645,14 @@ func (w *shellStreamWriter) decodeSegment(seg []byte) []byte {
 			}
 		}
 		return seg
+	}
+
+	if !w.fallback.IsCJK {
+		if info, ok := detectEncodingWithChardet(seg, true, 50, true); ok {
+			if out, _, err := transform.Bytes(info.Enc.NewDecoder(), seg); err == nil {
+				return out
+			}
+		}
 	}
 
 	out, _, err := transform.Bytes(w.decoder.NewDecoder(), seg)

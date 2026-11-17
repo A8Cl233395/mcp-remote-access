@@ -120,6 +120,13 @@ func CheckAndDownloadUpdate(serverAddr, userKey, targetExePath, goos, goarch str
 }
 
 func CheckAndDownloadUpdateWithInsecure(serverAddr, userKey, targetExePath, goos, goarch string, insecure bool) (bool, error) {
+	return checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch, insecure, nil)
+}
+
+func checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch string, insecure bool, onStatus func(string)) (bool, error) {
+	if onStatus != nil {
+		onStatus("Checking for updates...")
+	}
 	baseURL, err := NormalizeHTTPBaseURLWithInsecure(serverAddr, insecure)
 	if err != nil {
 		return false, err
@@ -172,6 +179,16 @@ func CheckAndDownloadUpdateWithInsecure(serverAddr, userKey, targetExePath, goos
 	if !manifest.Available || manifest.SHA256 == "" || strings.EqualFold(manifest.SHA256, curSHA) {
 		return false, nil
 	}
+	if onStatus != nil {
+		onStatus("Downloading update...")
+	}
+
+	newPath := targetExePath + ".new"
+	_ = os.Remove(newPath)
+	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return false, fmt.Errorf("create update file %s failed: %w", newPath, err)
+	}
 
 	dlClient := &http.Client{
 		Timeout:   5 * time.Minute,
@@ -180,26 +197,26 @@ func CheckAndDownloadUpdateWithInsecure(serverAddr, userKey, targetExePath, goos
 	binURL := fmt.Sprintf("%s/update/binary?os=%s&arch=%s", baseURL, url.QueryEscape(goos), url.QueryEscape(goarch))
 	dlReq, err := http.NewRequest("GET", binURL, nil)
 	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(newPath)
 		return false, err
 	}
 	dlReq.Header.Set(protocol.HeaderUserKey, userKey)
 
 	dlResp, err := dlClient.Do(dlReq)
 	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(newPath)
 		return false, err
 	}
 	defer dlResp.Body.Close()
 
 	if dlResp.StatusCode != http.StatusOK {
+		_ = f.Close()
+		_ = os.Remove(newPath)
 		return false, fmt.Errorf("download status %d", dlResp.StatusCode)
 	}
 
-	newPath := targetExePath + ".new"
-	_ = os.Remove(newPath)
-	f, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		return false, err
-	}
 	hasher := sha256.New()
 	mw := io.MultiWriter(f, hasher)
 	_, copyErr := io.Copy(mw, dlResp.Body)
@@ -283,10 +300,7 @@ func SelfUpdateAndRestartWithState(state RestartState, onStatus func(string)) er
 	if err != nil {
 		return err
 	}
-	if onStatus != nil {
-		onStatus("Checking for updates...")
-	}
-	updated, err := CheckAndDownloadUpdateWithInsecure(state.ServerAddr, state.UserKey, exe, runtime.GOOS, runtime.GOARCH, state.Insecure)
+	updated, err := checkAndDownloadUpdateWithStatus(state.ServerAddr, state.UserKey, exe, runtime.GOOS, runtime.GOARCH, state.Insecure, onStatus)
 	if err != nil {
 		return err
 	}

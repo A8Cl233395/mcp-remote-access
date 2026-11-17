@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -240,5 +241,56 @@ func TestShellStreamWriterDecoding(t *testing.T) {
 	want := "正在测试命令输出\r\n目录\r\n来自UTF8工具的中文输出\n请输入继续:"
 	if got != want {
 		t.Fatalf("shellStreamWriter decoded mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestDetectTextEncodingChardetAndFallback(t *testing.T) {
+	// 1. Real Windows-1252 text should be detected as windows-1252
+	win1252Bytes, _, err := transform.Bytes(charmap.Windows1252.NewEncoder(), []byte("Café résumé — naïve façade €100"))
+	if err != nil {
+		t.Fatalf("encode windows-1252: %v", err)
+	}
+	info, err := DetectTextEncoding(win1252Bytes, true)
+	if err != nil {
+		t.Fatalf("DetectTextEncoding windows-1252 failed: %v", err)
+	}
+	if info.Name != "windows-1252" {
+		t.Fatalf("expected windows-1252, got %s", info.Name)
+	}
+
+	// 2. Short and medium GBK text should be detected as gbk (never hijacked by windows-1252)
+	for _, sample := range []string{"中文", "第一行：中文测试\r\n第二行：目录与文件\r\n"} {
+		gbkBytes := encodeGBK(t, sample)
+		gInfo, err := DetectTextEncoding(gbkBytes, true)
+		if err != nil {
+			t.Fatalf("DetectTextEncoding gbk(%q) failed: %v", sample, err)
+		}
+		if gInfo.Name != "gbk" {
+			t.Fatalf("expected gbk for %q, got %s", sample, gInfo.Name)
+		}
+	}
+}
+
+func TestShellStreamWriterCP437FallbackWithGBK(t *testing.T) {
+	rec := &JobRecord{}
+	w := newShellStreamWriter(rec, "")
+	info, _ := LookupEncoding("cp437")
+	w.fallback = info
+	w.decoder = charmap.CodePage437
+	w.autoDetect = true
+
+	_, _ = w.Write([]byte("来自PowerShell的UTF8中文\n"))
+	_, _ = w.Write(encodeGBK(t, "来自GBK工具的中文输出：配置文件读取成功\r\n"))
+	w.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	rec.mu.Lock()
+	got := rec.buf.String()
+	rec.mu.Unlock()
+
+	want := "来自PowerShell的UTF8中文\n来自GBK工具的中文输出：配置文件读取成功\r\n"
+	if got != want {
+		t.Fatalf("cp437 fallback mismatch:\ngot:  %q\nwant: %q", got, want)
 	}
 }
