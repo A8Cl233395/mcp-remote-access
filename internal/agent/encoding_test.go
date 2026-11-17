@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/japanese"
 	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -292,5 +294,84 @@ func TestShellStreamWriterCP437FallbackWithGBK(t *testing.T) {
 	want := "来自PowerShell的UTF8中文\n来自GBK工具的中文输出：配置文件读取成功\r\n"
 	if got != want {
 		t.Fatalf("cp437 fallback mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestShellStreamWriterUTF8ConsoleMultiCJK(t *testing.T) {
+	rec := &JobRecord{}
+	w := newShellStreamWriter(rec, "")
+	w.fallback = EncodingInfo{Name: "utf-8"}
+	w.decoder = nil
+	w.autoDetect = true
+
+	sjisBytes, _, err := transform.Bytes(japanese.ShiftJIS.NewEncoder(), []byte("日本語のテキスト出力テストです\r\n"))
+	if err != nil {
+		t.Fatalf("encode ShiftJIS: %v", err)
+	}
+	big5Bytes, _, err := transform.Bytes(traditionalchinese.Big5.NewEncoder(), []byte("繁體中文測試輸出：讀取設定檔成功\r\n"))
+	if err != nil {
+		t.Fatalf("encode Big5: %v", err)
+	}
+
+	_, _ = w.Write([]byte("UTF8正常输出\n"))
+	_, _ = w.Write(encodeGBK(t, "简体中文GBK输出：操作成功\r\n"))
+	_, _ = w.Write(sjisBytes)
+	_, _ = w.Write(big5Bytes)
+	w.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	rec.mu.Lock()
+	got := rec.buf.String()
+	rec.mu.Unlock()
+
+	want := "UTF8正常输出\n简体中文GBK输出：操作成功\r\n日本語のテキスト出力テストです\r\n繁體中文測試輸出：讀取設定檔成功\r\n"
+	if got != want {
+		t.Fatalf("utf8 console multi-CJK mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestShellStreamWriterCP437ShortGBK(t *testing.T) {
+	rec := &JobRecord{}
+	w := newShellStreamWriter(rec, "")
+	info, _ := LookupEncoding("cp437")
+	w.fallback = info
+	w.decoder = charmap.CodePage437
+	w.autoDetect = true
+
+	_, _ = w.Write(encodeGBK(t, "错误\r\n"))
+	w.Close()
+
+	time.Sleep(10 * time.Millisecond)
+
+	rec.mu.Lock()
+	got := rec.buf.String()
+	rec.mu.Unlock()
+
+	want := "错误\r\n"
+	if got != want {
+		t.Fatalf("cp437 short GBK mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestShouldInjectPowerShellUTF8(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{"Get-ChildItem", true},
+		{"  \n  Write-Output 'ok'", true},
+		{"", false},
+		{"   # only comment", false},
+		{"param($x) Write-Output $x", false},
+		{"# comment\n  PARAM(\n$x)", false},
+		{"<# block #>\nusing namespace System.IO\nGet-Location", false},
+		{"using module Foo", false},
+		{"paramValue = 1", true},
+	}
+	for _, tc := range cases {
+		if got := shouldInjectPowerShellUTF8(tc.cmd); got != tc.want {
+			t.Fatalf("shouldInjectPowerShellUTF8(%q) = %v, want %v", tc.cmd, got, tc.want)
+		}
 	}
 }

@@ -104,7 +104,7 @@ func BuildShellCommand(shellPath, command, workdir string) *exec.Cmd {
 	switch name {
 	case "pwsh", "powershell":
 		psCommand := command
-		if runtime.GOOS == "windows" && strings.TrimSpace(command) != "" {
+		if runtime.GOOS == "windows" && shouldInjectPowerShellUTF8(command) {
 			psCommand = "$utf8 = New-Object System.Text.UTF8Encoding($false); [Console]::OutputEncoding = $utf8; [Console]::InputEncoding = $utf8; $OutputEncoding = $utf8; " + command
 		}
 		cmd = exec.Command(shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", psCommand)
@@ -118,6 +118,43 @@ func BuildShellCommand(shellPath, command, workdir string) *exec.Cmd {
 	cmd.Env = os.Environ()
 	configureProcessAttributes(cmd)
 	return cmd
+}
+
+func shouldInjectPowerShellUTF8(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return false
+	}
+	for {
+		trimmed = strings.TrimSpace(trimmed)
+		if strings.HasPrefix(trimmed, "<#") {
+			end := strings.Index(trimmed[2:], "#>")
+			if end == -1 {
+				break
+			}
+			trimmed = trimmed[2+end+2:]
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			if nl := strings.IndexByte(trimmed, '\n'); nl != -1 {
+				trimmed = trimmed[nl+1:]
+				continue
+			}
+			return false
+		}
+		break
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "using ") || strings.HasPrefix(lower, "using\t") {
+		return false
+	}
+	if strings.HasPrefix(lower, "param") {
+		rest := strings.TrimSpace(lower[len("param"):])
+		if strings.HasPrefix(rest, "(") {
+			return false
+		}
+	}
+	return true
 }
 
 func ExpandHome(p string) string {

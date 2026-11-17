@@ -275,26 +275,48 @@ func canDecodeCleanly(sample []byte, enc EncodingInfo, isEOF bool) bool {
 	return false
 }
 
+type detectOptions struct {
+	checkBOM             bool
+	rejectNul            bool
+	preferredFallback    string
+	preferCJKOnCollision bool
+}
+
 // DetectTextEncoding detects the encoding of sample (first chunk or full file).
 func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
+	return detectBytesEncoding(sample, isEOF, detectOptions{
+		checkBOM:          true,
+		rejectNul:         true,
+		preferredFallback: SystemFileEncoding(),
+	})
+}
+
+func detectBytesEncoding(sample []byte, isEOF bool, opts detectOptions) (EncodingInfo, error) {
 	// 1. Check BOM before NUL check so UTF-16LE/BE files are never rejected as binary.
-	if bytes.HasPrefix(sample, []byte{0xEF, 0xBB, 0xBF}) {
-		return LookupEncoding("utf-8-bom")
-	}
-	if bytes.HasPrefix(sample, []byte{0xFF, 0xFE}) {
-		return LookupEncoding("utf-16le")
-	}
-	if bytes.HasPrefix(sample, []byte{0xFE, 0xFF}) {
-		return LookupEncoding("utf-16be")
+	if opts.checkBOM {
+		if bytes.HasPrefix(sample, []byte{0xEF, 0xBB, 0xBF}) {
+			return LookupEncoding("utf-8-bom")
+		}
+		if bytes.HasPrefix(sample, []byte{0xFF, 0xFE}) {
+			return LookupEncoding("utf-16le")
+		}
+		if bytes.HasPrefix(sample, []byte{0xFE, 0xFF}) {
+			return LookupEncoding("utf-16be")
+		}
 	}
 
 	// 2. Reject binary files containing NUL bytes.
-	if bytes.IndexByte(sample, 0) != -1 {
+	if opts.rejectNul && bytes.IndexByte(sample, 0) != -1 {
 		return EncodingInfo{}, errBinaryDetected
 	}
 
 	// 3. Valid UTF-8 (including pure ASCII).
 	if isValidUTF8Sample(sample, isEOF) {
+		if opts.preferCJKOnCollision {
+			if info, ok := disambiguateShortCJKCollision(sample, opts.preferredFallback); ok {
+				return info, nil
+			}
+		}
 		return EncodingInfo{Name: "utf-8"}, nil
 	}
 
@@ -304,7 +326,7 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 	}
 
 	// 5. Fallback ordered candidate list: CJK multi-byte encodings before single-byte encodings
-	// so single-byte codepages (e.g. windows-1252) do not preempt CJK encodings.
+	// so single-byte codepages (e.g. windows-1252, cp437) do not preempt CJK encodings.
 	var candidates []string
 	seen := make(map[string]bool)
 	addCand := func(name string) {
@@ -315,7 +337,7 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 		candidates = append(candidates, name)
 	}
 
-	sysEnc := SystemFileEncoding()
+	sysEnc := opts.preferredFallback
 	if sysInfo, err := LookupEncoding(sysEnc); err == nil && sysInfo.IsCJK {
 		addCand(sysEnc)
 		if sysEnc == "gbk" {
@@ -342,13 +364,44 @@ func DetectTextEncoding(sample []byte, isEOF bool) (EncodingInfo, error) {
 		}
 	}
 
-	// Last-resort fallback: prefer system non-UTF-8 encoding if configured, else windows-1252.
+	// Last-resort fallback: prefer configured non-UTF-8 encoding if available, else windows-1252.
 	if sysEnc != "" && sysEnc != "utf-8" {
 		if info, err := LookupEncoding(sysEnc); err == nil {
 			return info, nil
 		}
 	}
 	return LookupEncoding("windows-1252")
+}
+
+// disambiguateShortCJKCollision resolves short CJK words (e.g. GBK "目录" = C4 BF C2 BC)
+// that accidentally form valid 2-byte UTF-8 sequences when the console fallback is CJK.
+// Genuine UTF-8 CJK/symbol output uses >= 3-byte runes (r >= 0x0800).
+func disambiguateShortCJKCollision(sample []byte, fallbackName string) (EncodingInfo, bool) {
+	info, err := LookupEncoding(fallbackName)
+	if err != nil || !info.IsCJK || info.Enc == nil {
+		return EncodingInfo{}, false
+	}
+	for i := 0; i < len(sample); {
+		r, sz := utf8.DecodeRune(sample[i:])
+		if r >= 0x0800 {
+			return EncodingInfo{}, false
+		}
+		i += sz
+	}
+	dec := info.Enc
+	if info.Name == "gbk" {
+		dec = simplifiedchinese.GB18030
+	}
+	if out, _, err := transform.Bytes(dec.NewDecoder(), sample); err == nil && !bytes.ContainsRune(out, utf8.RuneError) {
+		for i := 0; i < len(out); {
+			r, sz := utf8.DecodeRune(out[i:])
+			if r >= 0x2E80 {
+				return info, true
+			}
+			i += sz
+		}
+	}
+	return EncodingInfo{}, false
 }
 
 func detectEncodingWithChardet(sample []byte, isEOF bool, minConfidence int, cjkOnly bool) (EncodingInfo, bool) {
@@ -604,58 +657,21 @@ func (w *shellStreamWriter) decodeSegment(seg []byte) []byte {
 		return out
 	}
 
-	// Auto-detect per segment/line:
-	if w.decoder == nil {
-		// System console encoding is UTF-8.
-		if utf8.Valid(seg) {
-			return seg
-		}
-		// Fallback for legacy GBK output even on a UTF-8 locale if cleanly decodable.
-		if out, _, err := transform.Bytes(simplifiedchinese.GB18030.NewDecoder(), seg); err == nil && !bytes.ContainsRune(out, utf8.RuneError) {
-			return out
-		}
+	// Auto-detect per segment/line via shared detection core:
+	info, err := detectBytesEncoding(seg, true, detectOptions{
+		checkBOM:             false,
+		rejectNul:            false,
+		preferredFallback:    w.fallback.Name,
+		preferCJKOnCollision: w.fallback.IsCJK,
+	})
+	if err != nil || info.Enc == nil {
 		return seg
 	}
-
-	if utf8.Valid(seg) {
-		if !w.fallback.IsCJK {
-			return seg
-		}
-		// Disambiguate short CJK GBK words (like "目录" = C4 BF C2 BC) that collide with 2-byte UTF-8.
-		// Genuine UTF-8 CJK/symbol output uses >=3-byte runes (r >= 0x0800).
-		has3ByteOrMore := false
-		for i := 0; i < len(seg); {
-			r, sz := utf8.DecodeRune(seg[i:])
-			if r >= 0x0800 {
-				has3ByteOrMore = true
-				break
-			}
-			i += sz
-		}
-		if has3ByteOrMore {
-			return seg
-		}
-		if out, _, err := transform.Bytes(w.decoder.NewDecoder(), seg); err == nil && !bytes.ContainsRune(out, utf8.RuneError) {
-			for i := 0; i < len(out); {
-				r, sz := utf8.DecodeRune(out[i:])
-				if r >= 0x2E80 {
-					return out
-				}
-				i += sz
-			}
-		}
-		return seg
+	dec := info.Enc
+	if info.Name == "gbk" {
+		dec = simplifiedchinese.GB18030
 	}
-
-	if !w.fallback.IsCJK {
-		if info, ok := detectEncodingWithChardet(seg, true, 50, true); ok {
-			if out, _, err := transform.Bytes(info.Enc.NewDecoder(), seg); err == nil {
-				return out
-			}
-		}
-	}
-
-	out, _, err := transform.Bytes(w.decoder.NewDecoder(), seg)
+	out, _, err := transform.Bytes(dec.NewDecoder(), seg)
 	if err != nil {
 		return seg
 	}
