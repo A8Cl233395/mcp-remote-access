@@ -806,15 +806,17 @@ func (c *Client) dispatchRPC(req protocol.RPCRequest) protocol.RPCResponse {
 
 	case "job_read":
 		var p struct {
-			ID      any  `json:"id"`
-			Offset  *int `json:"offset,omitempty"`
-			Timeout *int `json:"timeout,omitempty"`
+			ID          any   `json:"id"`
+			Offset      *int  `json:"offset,omitempty"`
+			Timeout     *int  `json:"timeout,omitempty"`
+			WaitForExit *bool `json:"wait_for_exit,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.ID == nil {
 			return protocol.RPCResponse{OK: false, Error: "job_read requires `id`"}
 		}
 		idStr := fmt.Sprintf("%v", p.ID)
-		content, meta, err := c.jobs.ReadJob(idStr, p.Offset, p.Timeout)
+		waitForExit := p.WaitForExit != nil && *p.WaitForExit
+		content, meta, err := c.jobs.ReadJob(idStr, p.Offset, p.Timeout, waitForExit)
 		if err != nil {
 			return protocol.RPCResponse{OK: false, Error: err.Error()}
 		}

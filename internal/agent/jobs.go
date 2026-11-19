@@ -245,7 +245,7 @@ func (reg *JobRegistry) ExecuteShellWithEncoding(command, workdir, shellPath str
 		if onStateChange != nil {
 			onStateChange()
 		}
-		content, meta, err := reg.ReadJob(rec.ID, nil, intPtr(ExplicitBackgroundReadMs))
+		content, meta, err := reg.ReadJob(rec.ID, nil, intPtr(ExplicitBackgroundReadMs), false)
 		if err == nil && content != "" {
 			return content, meta, nil
 		}
@@ -436,7 +436,7 @@ func (reg *JobRegistry) settleRunning(rec *JobRecord) bool {
 	return running
 }
 
-func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string, map[string]any, error) {
+func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int, waitForExit bool) (string, map[string]any, error) {
 	id = normalizeJobID(id)
 	rec := reg.get(id)
 	if rec == nil {
@@ -448,11 +448,15 @@ func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string,
 		start = *offset
 	}
 
+	maxWaitMs := MaxJobReadWaitMs
+	if waitForExit {
+		maxWaitMs = MaxTimeoutMs
+	}
 	waitMs := DefaultJobReadWaitMs
 	if timeoutMs != nil && *timeoutMs >= 0 {
 		waitMs = *timeoutMs
-		if waitMs > MaxJobReadWaitMs {
-			waitMs = MaxJobReadWaitMs
+		if waitMs > maxWaitMs {
+			waitMs = maxWaitMs
 		}
 	}
 
@@ -461,84 +465,64 @@ func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string,
 	chunkMaxLines := DefaultMaxReadLines - 16
 
 	for {
-		chunk, nextOffset := reg.readChunk(rec, start, chunkMaxBytes, chunkMaxLines)
 		rec.mu.Lock()
 		alive := rec.Status == JobStatusRunning
-		silentFor := time.Since(rec.LastOutputAt)
-		startedAt := rec.StartedAt
-		spawnErr := rec.SpawnError
-		pid := rec.PID
 		rec.mu.Unlock()
 
-		if len(chunk) > 0 {
-			reg.setCursor(id, nextOffset)
-			running := false
-			if alive {
-				running = reg.settleRunning(rec)
-			}
+		if !waitForExit || !alive || !time.Now().Before(deadline) {
+			chunk, nextOffset := reg.readChunk(rec, start, chunkMaxBytes, chunkMaxLines)
 			rec.mu.Lock()
-			totalBytes := rec.buf.Len()
-			status := rec.Status
-			exitCode := rec.ExitCode
+			alive = rec.Status == JobStatusRunning
+			silentFor := time.Since(rec.LastOutputAt)
+			startedAt := rec.StartedAt
+			spawnErr := rec.SpawnError
+			pid := rec.PID
 			rec.mu.Unlock()
 
-			if !running {
-				pending := totalBytes - nextOffset
-				if pending < 0 {
-					pending = 0
+			if len(chunk) > 0 {
+				reg.setCursor(id, nextOffset)
+				running := false
+				if alive {
+					running = reg.settleRunning(rec)
 				}
-				var survivors *bool
-				if status != JobStatusKilled {
-					survivors = IsProcessGroupAlive(pid)
+				rec.mu.Lock()
+				totalBytes := rec.buf.Len()
+				status := rec.Status
+				exitCode := rec.ExitCode
+				rec.mu.Unlock()
+
+				if !running {
+					pending := totalBytes - nextOffset
+					if pending < 0 {
+						pending = 0
+					}
+					var survivors *bool
+					if status != JobStatusKilled {
+						survivors = IsProcessGroupAlive(pid)
+					}
+					return formatExitReceipt(rec, chunk, pending, status == JobStatusKilled, survivors), map[string]any{
+						"jobId":       id,
+						"status":      string(status),
+						"exit":        exitCode,
+						"next_offset": nextOffset,
+					}, nil
 				}
-				return formatExitReceipt(rec, chunk, pending, status == JobStatusKilled, survivors), map[string]any{
+				elapsed := time.Since(startedAt)
+				head := fmt.Sprintf("job #%s running (%s)\nnext_offset: %d\n\n%s", id, FormatElapsed(elapsed), nextOffset, strings.TrimRight(chunk, " \t\r\n"))
+				return head, map[string]any{
 					"jobId":       id,
 					"status":      string(status),
-					"exit":        exitCode,
 					"next_offset": nextOffset,
+					"silentForMs": silentFor.Milliseconds(),
 				}, nil
 			}
-			elapsed := time.Since(startedAt)
-			head := fmt.Sprintf("job #%s running (%s)\nnext_offset: %d\n\n%s", id, FormatElapsed(elapsed), nextOffset, strings.TrimRight(chunk, " \t\r\n"))
-			return head, map[string]any{
-				"jobId":       id,
-				"status":      string(status),
-				"next_offset": nextOffset,
-				"silentForMs": silentFor.Milliseconds(),
-			}, nil
-		}
 
-		if !alive {
-			rec.mu.Lock()
-			status := rec.Status
-			exitCode := rec.ExitCode
-			rec.mu.Unlock()
+			if !alive {
+				rec.mu.Lock()
+				status := rec.Status
+				exitCode := rec.ExitCode
+				rec.mu.Unlock()
 
-			tailText := reg.jobTail(rec, 40, 8192)
-			if tailText == "" {
-				tailText = spawnErr
-			}
-			var survivors *bool
-			if status != JobStatusKilled {
-				survivors = IsProcessGroupAlive(pid)
-			}
-			return formatExitReceipt(rec, tailText, 0, status == JobStatusKilled, survivors), map[string]any{
-				"jobId":       id,
-				"status":      string(status),
-				"exit":        exitCode,
-				"next_offset": start,
-			}, nil
-		}
-
-		if time.Now().After(deadline) {
-			running := reg.settleRunning(rec)
-			rec.mu.Lock()
-			status := rec.Status
-			exitCode := rec.ExitCode
-			completedAt := rec.CompletedAt
-			rec.mu.Unlock()
-
-			if !running {
 				tailText := reg.jobTail(rec, 40, 8192)
 				if tailText == "" {
 					tailText = spawnErr
@@ -555,35 +539,71 @@ func (reg *JobRegistry) ReadJob(id string, offset *int, timeoutMs *int) (string,
 				}, nil
 			}
 
-			if silentFor.Milliseconds() >= StallAfterMs {
-				silentSec := int(silentFor.Seconds())
-				return fmt.Sprintf("job #%s stalled - no output for %ds. job_kill it or wait longer.", id, silentSec), map[string]any{
+			if !time.Now().Before(deadline) {
+				running := reg.settleRunning(rec)
+				rec.mu.Lock()
+				status := rec.Status
+				exitCode := rec.ExitCode
+				completedAt := rec.CompletedAt
+				rec.mu.Unlock()
+
+				if !running {
+					tailText := reg.jobTail(rec, 40, 8192)
+					if tailText == "" {
+						tailText = spawnErr
+					}
+					var survivors *bool
+					if status != JobStatusKilled {
+						survivors = IsProcessGroupAlive(pid)
+					}
+					return formatExitReceipt(rec, tailText, 0, status == JobStatusKilled, survivors), map[string]any{
+						"jobId":       id,
+						"status":      string(status),
+						"exit":        exitCode,
+						"next_offset": start,
+					}, nil
+				}
+
+				if silentFor.Milliseconds() >= StallAfterMs {
+					silentSec := int(silentFor.Seconds())
+					return fmt.Sprintf("job #%s stalled - no output for %ds. job_kill it or wait longer.", id, silentSec), map[string]any{
+						"jobId":       id,
+						"status":      "stalled",
+						"silentForMs": silentFor.Milliseconds(),
+					}, nil
+				}
+				end := time.Now()
+				if completedAt != nil {
+					end = *completedAt
+				}
+				elapsed := end.Sub(startedAt)
+				return fmt.Sprintf("job #%s running (%s)\nnext_offset: %d\n\n(no output)", id, FormatElapsed(elapsed), start), map[string]any{
 					"jobId":       id,
-					"status":      "stalled",
+					"status":      string(status),
+					"next_offset": start,
 					"silentForMs": silentFor.Milliseconds(),
 				}, nil
 			}
-			end := time.Now()
-			if completedAt != nil {
-				end = *completedAt
-			}
-			elapsed := end.Sub(startedAt)
-			return fmt.Sprintf("job #%s running (%s)\nnext_offset: %d\n\n(no output)", id, FormatElapsed(elapsed), start), map[string]any{
-				"jobId":       id,
-				"status":      string(status),
-				"next_offset": start,
-				"silentForMs": silentFor.Milliseconds(),
-			}, nil
 		}
 
 		remain := time.Until(deadline)
+		if remain <= 0 {
+			continue
+		}
 		if remain > 100*time.Millisecond {
 			remain = 100 * time.Millisecond
 		}
-		select {
-		case <-rec.notifyCh:
-		case <-rec.doneCh:
-		case <-time.After(remain):
+		if waitForExit {
+			select {
+			case <-rec.doneCh:
+			case <-time.After(remain):
+			}
+		} else {
+			select {
+			case <-rec.notifyCh:
+			case <-rec.doneCh:
+			case <-time.After(remain):
+			}
 		}
 	}
 }

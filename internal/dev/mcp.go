@@ -531,7 +531,7 @@ func ToolDefinitions() []MCPToolDefinition {
 		},
 		{
 			Name:        "shell",
-			Description: "Execute a shell command on the remote machine and return its output (automatically decoding non-UTF-8 console output such as Windows GBK/CP936 to UTF-8). Commands accept an optional timeout; a command that does not finish within 30 seconds is moved to a background job. Set timeout to 0 to start in the background and wait once for its first output (up to 3000 ms). Background jobs survive network reconnects; read them with job_read and stop them with job_kill.",
+			Description: "Execute a shell command on the remote machine and return its output (automatically decoding non-UTF-8 console output such as Windows GBK/CP936 to UTF-8). Commands accept an optional timeout; a command that does not finish within 30 seconds is moved to a background job. Background jobs survive network reconnects; read them with job_read and stop them with job_kill.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -571,7 +571,7 @@ func ToolDefinitions() []MCPToolDefinition {
 		},
 		{
 			Name:        "job_read",
-			Description: "Read output from a background job on the active remote machine. Reads are incremental: omitting offset returns only output produced since the previous read, while offset: 0 re-reads from the beginning; the result includes next_offset.",
+			Description: "Read output from a background job on the active remote machine. Reads are incremental and include next_offset. When the job has exited, the result reports its status and any unread output; call job_read again if unread output remains. By default, returns as soon as unread output exists; otherwise blocks up to 5000 ms.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -587,7 +587,11 @@ func ToolDefinitions() []MCPToolDefinition {
 						"type":        "integer",
 						"minimum":     0,
 						"maximum":     900000,
-						"description": "Timeout in milliseconds. Blocks only while there is no new output. Defaults to 5000 ms.",
+						"description": "Timeout in milliseconds. Defaults to 5000 ms; clamped to 60000 ms (900000 ms when wait_for_exit is true).",
+					},
+					"wait_for_exit": map[string]any{
+						"type":        "boolean",
+						"description": "Wait until the job exits or timeout elapses, instead of returning on new output. Defaults to false.",
 					},
 				},
 				"required": []string{"id"},
@@ -595,7 +599,7 @@ func ToolDefinitions() []MCPToolDefinition {
 		},
 		{
 			Name:        "job_kill",
-			Description: "Stop a background job and its child processes on the active remote machine, then return its final status and any unread output.",
+			Description: "Stop a background job and its child processes on the active remote machine, then return its final status and any unread output. Killing an exited job is a no-op.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
