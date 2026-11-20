@@ -362,7 +362,7 @@ func TestCheckAndDownloadUpdateStatusStages(t *testing.T) {
 	}
 
 	var statuses []string
-	updated, err := checkAndDownloadUpdateWithStatus(srv.URL, "k", exePath, runtime.GOOS, runtime.GOARCH, true, func(st string) {
+	updated, err := checkAndDownloadUpdateWithStatus(srv.URL, "k", exePath, runtime.GOOS, runtime.GOARCH, true, false, func(st string) {
 		statuses = append(statuses, st)
 	})
 	if err != nil {
@@ -377,7 +377,7 @@ func TestCheckAndDownloadUpdateStatusStages(t *testing.T) {
 
 	// Second call with matching SHA256 should only emit "Checking for updates..."
 	statuses = nil
-	updated, err = checkAndDownloadUpdateWithStatus(srv.URL, "k", exePath, runtime.GOOS, runtime.GOARCH, true, func(st string) {
+	updated, err = checkAndDownloadUpdateWithStatus(srv.URL, "k", exePath, runtime.GOOS, runtime.GOARCH, true, false, func(st string) {
 		statuses = append(statuses, st)
 	})
 	if err != nil {

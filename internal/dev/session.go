@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -51,6 +52,7 @@ type SessionConfig struct {
 	DevKey         string
 	DefaultMachine string
 	Insecure       bool
+	NoProxy        bool
 	Logger         *log.Logger
 }
 
@@ -110,6 +112,15 @@ func (s *Session) getOrConnect() (*yamux.Session, error) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:  agent.BuildClientTLSConfig(s.cfg.Insecure),
+	}
+	if !s.cfg.NoProxy {
+		dialer.Proxy = func(req *http.Request) (*url.URL, error) {
+			u, err := agent.SystemProxyFunc(req)
+			if err == nil && u != nil && s.cfg.Logger != nil {
+				s.cfg.Logger.Printf("Using system proxy %s for %s", u.Redacted(), req.URL.Host)
+			}
+			return u, err
+		}
 	}
 	headers := http.Header{}
 	headers.Set(protocol.HeaderDevKey, s.cfg.DevKey)

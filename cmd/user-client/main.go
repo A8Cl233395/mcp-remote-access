@@ -26,6 +26,7 @@ func main() {
 	defaultShell := envOrDefault("MCP_SHELL", "")
 	defaultWorkdir := envOrDefault("MCP_WORKDIR", "")
 	defaultInsecure := envOrDefault("MCP_INSECURE", "") == "1"
+	defaultNoProxy := envOrDefault("MCP_NO_PROXY", "") == "1"
 	if handoff != nil {
 		if handoff.ServerAddr != "" {
 			defaultServer = handoff.ServerAddr
@@ -45,6 +46,9 @@ func main() {
 		if handoff.Insecure {
 			defaultInsecure = true
 		}
+		if handoff.NoProxy {
+			defaultNoProxy = true
+		}
 	}
 
 	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of GUI mode")
@@ -56,6 +60,7 @@ func main() {
 	workdir := flag.String("workdir", defaultWorkdir, "Initial working directory")
 	noUpdate := flag.Bool("no-update", false, "Disable automatic binary self-update check")
 	insecure := flag.Bool("insecure", defaultInsecure, "Skip SSL certificate verification and allow insecure connections")
+	noProxy := flag.Bool("no-proxy", defaultNoProxy, "Disable system and environment proxy and connect directly")
 	saveFile := flag.Bool("save", agent.HasConfigFile(), "Save configuration to file (defaults to true if previous config exists)")
 	flag.Parse()
 
@@ -67,6 +72,7 @@ func main() {
 		Workdir:    *workdir,
 		AutoUpdate: !*noUpdate,
 		Insecure:   *insecure,
+		NoProxy:    *noProxy,
 	}
 
 	if *cliMode && !*guiMode {

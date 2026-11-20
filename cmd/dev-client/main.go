@@ -14,6 +14,7 @@ func main() {
 	devKey := flag.String("key", envOrDefault("MCP_DEV_KEY", "default-dev-key"), "Developer authentication key")
 	defaultMachine := flag.String("machine", envOrDefault("MCP_DEFAULT_MACHINE", ""), "Optional default target machine ID")
 	insecure := flag.Bool("insecure", envOrDefault("MCP_INSECURE", "") == "1", "Skip SSL certificate verification and allow insecure connections")
+	noProxy := flag.Bool("no-proxy", envOrDefault("MCP_NO_PROXY", "") == "1", "Disable system and environment proxy and connect directly")
 	flag.Parse()
 
 	sess := dev.NewSession(dev.SessionConfig{
@@ -21,6 +22,7 @@ func main() {
 		DevKey:         *devKey,
 		DefaultMachine: *defaultMachine,
 		Insecure:       *insecure,
+		NoProxy:        *noProxy,
 	})
 	defer sess.Close()
 

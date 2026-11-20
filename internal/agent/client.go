@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -71,6 +72,7 @@ type ClientOptions struct {
 	Workdir    string
 	AutoUpdate bool
 	Insecure   bool
+	NoProxy    bool
 	OnStatus   func(status string)
 	Logger     *log.Logger
 }
@@ -306,6 +308,7 @@ func (c *Client) Run(ctx context.Context) error {
 				Shell:      info.Shell,
 				Workdir:    info.Workdir,
 				Insecure:   c.opts.Insecure,
+				NoProxy:    c.opts.NoProxy,
 			}, c.opts.OnStatus); updErr != nil {
 				if fatalErr := classifyUpdateError(updErr); fatalErr != nil {
 					c.setStatus(fmt.Sprintf("Error: %v", fatalErr))
@@ -351,6 +354,15 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:  BuildClientTLSConfig(c.opts.Insecure),
+	}
+	if !c.opts.NoProxy {
+		dialer.Proxy = func(req *http.Request) (*url.URL, error) {
+			u, err := SystemProxyFunc(req)
+			if err == nil && u != nil {
+				c.opts.Logger.Printf("Using system proxy %s for %s", u.Redacted(), req.URL.Host)
+			}
+			return u, err
+		}
 	}
 	headers := http.Header{}
 	headers.Set(protocol.HeaderUserKey, c.GetUserKey())

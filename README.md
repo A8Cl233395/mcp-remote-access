@@ -143,7 +143,7 @@ go build -trimpath -ldflags="-s -w -X mcp-remoteaccess/internal/protocol.Default
   ```bash
   ./relay-server -addr :20055 -user-key "my-user-secret" -dev-key "my-dev-secret" -tls-cert /path/to/fullchain.pem -tls-key /path/to/privkey.pem
   ```
-  > 默认情况下，客户端（`user-client` 与 `dev-client`）强制将所有连接重写为 `https://` 与 `wss://`，绝不回退明文（防降级攻击），并严格校验系统根证书链（拒绝自签名或中间人伪造证书）。
+  > 默认情况下，客户端（`user-client` 与 `dev-client`）强制将所有连接重写为 `https://` 与 `wss://`，绝不回退明文（防降级攻击），并严格校验系统根证书链（拒绝自签名或中间人伪造证书）。同时客户端的 WebSocket 连接与自动更新检查会自动走系统代理（优先读取 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 并遵守 `NO_PROXY`，未设置环境变量时在 Windows 自动读取 WinHTTP 系统代理与 PAC 配置、在 Linux 桌面环境回退读取 GNOME 代理设置；支持 HTTP CONNECT 与 SOCKS5，回环地址自动直连）；如需忽略所有代理强制直连（例如内网 `hosts` 指向内网 IP 且不希望流量经过代理），可在客户端加上 `-no-proxy`（或设置 `MCP_NO_PROXY=1`）。
 
 - **手动跳过 SSL 校验模式（服务端与客户端均加上 `-insecure` flag）**：
   当你手动配置、在纯 IP 或内网环境下不想配证书时，可以在服务端和客户端同时加上 `-insecure`：

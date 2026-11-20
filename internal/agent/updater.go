@@ -120,10 +120,14 @@ func CheckAndDownloadUpdate(serverAddr, userKey, targetExePath, goos, goarch str
 }
 
 func CheckAndDownloadUpdateWithInsecure(serverAddr, userKey, targetExePath, goos, goarch string, insecure bool) (bool, error) {
-	return checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch, insecure, nil)
+	return checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch, insecure, false, nil)
 }
 
-func checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch string, insecure bool, onStatus func(string)) (bool, error) {
+func CheckAndDownloadUpdateWithOptions(serverAddr, userKey, targetExePath, goos, goarch string, insecure, noProxy bool) (bool, error) {
+	return checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch, insecure, noProxy, nil)
+}
+
+func checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, goarch string, insecure, noProxy bool, onStatus func(string)) (bool, error) {
 	if onStatus != nil {
 		onStatus("Checking for updates...")
 	}
@@ -139,6 +143,10 @@ func checkAndDownloadUpdateWithStatus(serverAddr, userKey, targetExePath, goos, 
 	tr := &http.Transport{
 		TLSClientConfig: BuildClientTLSConfig(insecure),
 	}
+	if !noProxy {
+		tr.Proxy = SystemProxyFunc
+	}
+	defer tr.CloseIdleConnections()
 	client := &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: tr,
@@ -256,6 +264,7 @@ type RestartState struct {
 	Shell      string `json:"shell,omitempty"`
 	Workdir    string `json:"workdir,omitempty"`
 	Insecure   bool   `json:"insecure,omitempty"`
+	NoProxy    bool   `json:"no_proxy,omitempty"`
 }
 
 // ConsumeRestartState reads and immediately clears the one-shot restart handoff
@@ -300,7 +309,7 @@ func SelfUpdateAndRestartWithState(state RestartState, onStatus func(string)) er
 	if err != nil {
 		return err
 	}
-	updated, err := checkAndDownloadUpdateWithStatus(state.ServerAddr, state.UserKey, exe, runtime.GOOS, runtime.GOARCH, state.Insecure, onStatus)
+	updated, err := checkAndDownloadUpdateWithStatus(state.ServerAddr, state.UserKey, exe, runtime.GOOS, runtime.GOARCH, state.Insecure, state.NoProxy, onStatus)
 	if err != nil {
 		return err
 	}
